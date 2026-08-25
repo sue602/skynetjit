@@ -56,6 +56,19 @@ diff --git a/service/debug_console.lua b/service/debug_console.lua
  		t = t - min * 100 * 60
  		local sec = t / 100
  		return string.format("%s%d:%.2gs",hour == 0 and "" or (hour .. ":"),min,sec)
+diff --git a/lualib/skynet/service.lua b/lualib/skynet/service.lua
+--- a/lualib/skynet/service.lua
++++ b/lualib/skynet/service.lua
+@@ -9,6 +9,9 @@ local function get_provider()
+ end
+ 
+ local function check(func)
++	if _VERSION == "Lua 5.1" then
++		return -- LuaJIT uses a function environment instead of an _ENV upvalue.
++	end
+ 	local info = debug.getinfo(func, "u")
+ 	assert(info.nups == 1)
+ 	assert(debug.getupvalue(func,1) == "_ENV")
 diff --git a/lualib-src/lua-crypt.c b/lualib-src/lua-crypt.c
 --- a/lualib-src/lua-crypt.c
 +++ b/lualib-src/lua-crypt.c

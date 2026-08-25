@@ -117,6 +117,8 @@ git -C "$ROOT_DIR/third_party/luajit2" archive HEAD |
 mkdir -p "$WORK_DIR/skynet/lualib/skynetjit"
 cp "$ROOT_DIR/compat/lua/skynetjit/compat.lua" \
 	"$WORK_DIR/skynet/lualib/skynetjit/compat.lua"
+cp "$ROOT_DIR/compat/lua/skynet/sharetable.lua" \
+	"$WORK_DIR/skynet/lualib/skynet/sharetable.lua"
 
 echo "Building LuaJIT2 for x64..."
 make -C "$WORK_DIR/luajit2" -j"$JOBS" \

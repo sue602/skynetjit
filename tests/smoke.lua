@@ -23,6 +23,6 @@ assert(client_loader, client_error)
 assert(require "skynet.crypt")
 
 local ok, message = pcall(require, "skynet.sharetable.core")
-assert(not ok and tostring(message):find("unavailable with the LuaJIT backend", 1, true))
+assert(not ok and tostring(message):find("use the LuaJIT sharedata backend", 1, true))
 
 io.stdout:write("smoke: LuaJIT x64 and core modules loaded successfully\n")
