@@ -25,6 +25,15 @@ static SRWLOCK registry_lock = SRWLOCK_INIT;
 static struct handle_entry *registry_entries;
 static size_t registry_capacity;
 
+/* Winsock polling cannot wait on a console HANDLE. A reader thread forwards
+ * fd 0 into this socket pair so the unmodified Skynet socket loop can poll it.
+ */
+static INIT_ONCE stdin_bridge_once = INIT_ONCE_STATIC_INIT;
+static SOCKET stdin_bridge_reader = INVALID_SOCKET;
+static SOCKET stdin_bridge_writer = INVALID_SOCKET;
+static HANDLE stdin_bridge_thread_handle;
+static volatile LONG stdin_bridge_started;
+
 static BOOL CALLBACK
 registry_init(PINIT_ONCE once, PVOID parameter, PVOID *context) {
 	WSADATA data;
@@ -134,9 +143,150 @@ registry_take(int id, enum handle_kind *kind, uintptr_t *value) {
 	return found;
 }
 
+static int
+native_socket_pair(SOCKET pair[2]) {
+	struct sockaddr_in address;
+	int address_size = (int)sizeof(address);
+	SOCKET listener = INVALID_SOCKET;
+	SOCKET writer = INVALID_SOCKET;
+	SOCKET reader = INVALID_SOCKET;
+
+	memset(&address, 0, sizeof(address));
+	address.sin_family = AF_INET;
+	address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	address.sin_port = 0;
+
+	listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (listener == INVALID_SOCKET ||
+	    bind(listener, (struct sockaddr *)&address, sizeof(address)) ==
+		SOCKET_ERROR ||
+	    listen(listener, 1) == SOCKET_ERROR ||
+	    getsockname(listener, (struct sockaddr *)&address, &address_size) ==
+		SOCKET_ERROR)
+		goto failed;
+
+	writer = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (writer == INVALID_SOCKET ||
+	    connect(writer, (struct sockaddr *)&address, address_size) ==
+		SOCKET_ERROR)
+		goto failed;
+	reader = accept(listener, NULL, NULL);
+	if (reader == INVALID_SOCKET)
+		goto failed;
+
+	closesocket(listener);
+	pair[0] = reader;
+	pair[1] = writer;
+	return 0;
+
+failed:
+	{
+		int error = WSAGetLastError();
+		if (listener != INVALID_SOCKET) closesocket(listener);
+		if (writer != INVALID_SOCKET) closesocket(writer);
+		if (reader != INVALID_SOCKET) closesocket(reader);
+		set_errno_from_wsa(error);
+	}
+	return -1;
+}
+
+static unsigned __stdcall
+stdin_bridge_worker(void *parameter) {
+	SOCKET writer = (SOCKET)(uintptr_t)parameter;
+	char buffer[4096];
+
+	for (;;) {
+		int count = _read(0, buffer, sizeof(buffer));
+		int offset = 0;
+		if (count < 0 && errno == EINTR)
+			continue;
+		if (count <= 0)
+			break;
+		while (offset < count) {
+			int sent = send(writer, buffer + offset, count - offset, 0);
+			if (sent == SOCKET_ERROR && WSAGetLastError() == WSAEINTR)
+				continue;
+			if (sent <= 0)
+				goto finished;
+			offset += sent;
+		}
+	}
+
+finished:
+	shutdown(writer, SD_SEND);
+	return 0;
+}
+
+static BOOL CALLBACK
+stdin_bridge_init(PINIT_ONCE once, PVOID parameter, PVOID *context) {
+	SOCKET pair[2];
+	uintptr_t thread;
+	(void)once;
+	(void)parameter;
+	(void)context;
+
+	if (ensure_registry() != 0 || native_socket_pair(pair) != 0)
+		return FALSE;
+	thread = _beginthreadex(NULL, 0, stdin_bridge_worker,
+				(void *)(uintptr_t)pair[1], 0, NULL);
+	if (thread == 0) {
+		closesocket(pair[0]);
+		closesocket(pair[1]);
+		errno = EAGAIN;
+		return FALSE;
+	}
+
+	stdin_bridge_reader = pair[0];
+	stdin_bridge_writer = pair[1];
+	stdin_bridge_thread_handle = (HANDLE)thread;
+	InterlockedExchange(&stdin_bridge_started, 1);
+	return TRUE;
+}
+
+static SOCKET
+stdin_socket_value(void) {
+	if (!InitOnceExecuteOnce(&stdin_bridge_once, stdin_bridge_init,
+				 NULL, NULL)) {
+		if (errno == 0) errno = EIO;
+		return INVALID_SOCKET;
+	}
+	return stdin_bridge_reader;
+}
+
+static int
+stdin_bridge_close(void) {
+	DWORD wait_result = WAIT_OBJECT_0;
+	if (!InterlockedExchange(&stdin_bridge_started, 0))
+		return _close(0);
+
+	if (stdin_bridge_writer != INVALID_SOCKET)
+		shutdown(stdin_bridge_writer, SD_BOTH);
+	if (stdin_bridge_thread_handle != NULL) {
+		CancelSynchronousIo(stdin_bridge_thread_handle);
+		wait_result = WaitForSingleObject(stdin_bridge_thread_handle, 1000);
+		CloseHandle(stdin_bridge_thread_handle);
+		stdin_bridge_thread_handle = NULL;
+	}
+	if (stdin_bridge_writer != INVALID_SOCKET) {
+		closesocket(stdin_bridge_writer);
+		stdin_bridge_writer = INVALID_SOCKET;
+	}
+	if (stdin_bridge_reader != INVALID_SOCKET) {
+		closesocket(stdin_bridge_reader);
+		stdin_bridge_reader = INVALID_SOCKET;
+	}
+	if (wait_result == WAIT_FAILED) {
+		errno = EIO;
+		return -1;
+	}
+	return 0;
+}
+
 static SOCKET
 socket_value(int fd) {
 	uintptr_t value;
+	if (fd == 0)
+		return stdin_socket_value();
 	if (registry_get(fd, HANDLE_KIND_SOCKET, &value))
 		return (SOCKET)value;
 	/* Compatibility for callers that still pass a low-valued native socket. */
@@ -202,6 +352,8 @@ SOCKET_CALL(getsockname, (int fd, struct sockaddr *name, int *namelen),
 
 int
 skynetjit_send(int fd, const void *buf, int len, int flags) {
+	if (len == 0)
+		return 0;
 	int result = send(socket_value(fd), (const char *)buf, len, flags);
 	if (result == SOCKET_ERROR)
 		set_errno_from_wsa(WSAGetLastError());
@@ -220,6 +372,8 @@ skynetjit_sendto(int fd, const void *buf, int len, int flags,
 
 int
 skynetjit_recv(int fd, void *buf, int len, int flags) {
+	if (len == 0)
+		return 0;
 	int result = recv(socket_value(fd), (char *)buf, len, flags);
 	if (result == SOCKET_ERROR)
 		set_errno_from_wsa(WSAGetLastError());
@@ -365,6 +519,8 @@ int
 skynetjit_close(int fd) {
 	enum handle_kind kind;
 	uintptr_t value;
+	if (fd == 0)
+		return stdin_bridge_close();
 	if (registry_take(fd, &kind, &value)) {
 		if (kind == HANDLE_KIND_SOCKET)
 			return closesocket((SOCKET)value);
@@ -381,6 +537,10 @@ skynetjit_close(int fd) {
 int
 skynetjit_read(int fd, void *buffer, unsigned int size) {
 	uintptr_t value;
+	if (size == 0)
+		return 0;
+	if (fd == 0)
+		return skynetjit_recv(fd, buffer, (int)size, 0);
 	if (registry_get(fd, HANDLE_KIND_SOCKET, &value))
 		return skynetjit_recv(fd, buffer, (int)size, 0);
 	return _read(fd, buffer, size);
@@ -389,6 +549,8 @@ skynetjit_read(int fd, void *buffer, unsigned int size) {
 int
 skynetjit_write(int fd, const void *buffer, unsigned int size) {
 	uintptr_t value;
+	if (size == 0)
+		return 0;
 	if (registry_get(fd, HANDLE_KIND_SOCKET, &value))
 		return skynetjit_send(fd, buffer, (int)size, 0);
 	return _write(fd, buffer, size);

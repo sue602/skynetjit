@@ -147,6 +147,41 @@ if [ -f "$MINGW_ROOT/bin/libwinpthread-1.dll" ]; then
 	cp "$MINGW_ROOT/bin/libwinpthread-1.dll" "$OUT_DIR/"
 fi
 
+run_skynet_exit_test() {
+	local config=$1
+	local log=$2
+	local input=${3-}
+	local pid
+	local done=0
+
+	rm -f "$log"
+	if [ -n "$input" ]; then
+		printf '%b' "$input" | ./skynet.exe "$config" > "$log" 2>&1 &
+	else
+		./skynet.exe "$config" > "$log" 2>&1 &
+	fi
+	pid=$!
+	for _ in $(seq 1 150); do
+		if ! kill -0 "$pid" 2>/dev/null; then
+			done=1
+			break
+		fi
+		sleep 0.1
+	done
+	if [ "$done" -eq 0 ]; then
+		kill "$pid" 2>/dev/null || true
+		wait "$pid" 2>/dev/null || true
+		cat "$log" >&2
+		echo "Skynet exit test timed out: $config" >&2
+		return 1
+	fi
+	if ! wait "$pid"; then
+		cat "$log" >&2
+		return 1
+	fi
+	cat "$log"
+}
+
 if [ "$RUN_TESTS" -eq 1 ]; then
 	echo "Running x64, Lua compatibility, and module smoke tests..."
 	(
@@ -195,6 +230,24 @@ if [ "$RUN_TESTS" -eq 1 ]; then
 		fi
 		cat runtime-smoke.log
 		grep -q "runtime-smoke: Skynet x64 socket loop succeeded" runtime-smoke.log
+	)
+	echo "Running graceful abort smoke test..."
+	(
+		cd "$OUT_DIR"
+		rm -f abort-smoke.ok
+		run_skynet_exit_test ../../tests/abort-config.lua abort-smoke.log
+		test -f abort-smoke.ok
+		grep -q "abort-smoke: graceful shutdown requested" abort-smoke.log
+	)
+	echo "Running Windows console stdin bridge smoke test..."
+	(
+		cd "$OUT_DIR"
+		rm -f abort-smoke.ok
+		run_skynet_exit_test ../../tests/console-config.lua \
+			console-smoke.log 'abort_smoke\n'
+		test -f abort-smoke.ok
+		grep -q "LAUNCH snlua console" console-smoke.log
+		grep -q "abort-smoke: graceful shutdown requested" console-smoke.log
 	)
 fi
 
