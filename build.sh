@@ -151,6 +151,7 @@ run_skynet_exit_test() {
 	local config=$1
 	local log=$2
 	local input=${3-}
+	local timeout_tenths=${4:-150}
 	local pid
 	local done=0
 
@@ -161,7 +162,7 @@ run_skynet_exit_test() {
 		./skynet.exe "$config" > "$log" 2>&1 &
 	fi
 	pid=$!
-	for _ in $(seq 1 150); do
+	for _ in $(seq 1 "$timeout_tenths"); do
 		if ! kill -0 "$pid" 2>/dev/null; then
 			done=1
 			break
@@ -248,6 +249,16 @@ if [ "$RUN_TESTS" -eq 1 ]; then
 		test -f abort-smoke.ok
 		grep -q "LAUNCH snlua console" console-smoke.log
 		grep -q "abort-smoke: graceful shutdown requested" console-smoke.log
+	)
+	echo "Running wepoll 8192-socket capacity smoke test..."
+	(
+		cd "$OUT_DIR"
+		rm -f socket-capacity.ok
+		run_skynet_exit_test ../../tests/socket-capacity-config.lua \
+			socket-capacity.log '' 600
+		test -f socket-capacity.ok
+		grep -q "socket-capacity: 8192 sockets registered" \
+			socket-capacity.log
 	)
 fi
 

@@ -82,6 +82,8 @@ skynet.exe examples\config
 - `compat/win64` 提供 Win64 `SOCKET`/`HANDLE` 到 Skynet 整型描述符的线程安全映射，
   并封装 socket、pipe、select 和 wepoll 调用，避免在 x64 下截断句柄；控制台 stdin
   通过读取线程和 loopback socketpair 接入 wepoll。
+- Windows 构建将 WinSock `FD_SETSIZE` 统一设为 8192；Skynet socket 事件循环使用
+  wepoll，且一键测试会同时创建并注册 8192 个 UDP socket 验证容量。
 - Win64 I/O 包装保持 POSIX 的零长度 read/recv 立即返回语义，使 `skynet.abort`
   能够处理无 payload 的退出控制命令并完成线程回收。
 - `compat/luajit` 提供 Skynet 当前 Lua 5.4 C API 到 LuaJIT 2.1 API 的适配。
@@ -96,7 +98,8 @@ skynet.exe examples\config
 
 一键测试会验证 PE/x64 LuaJIT 环境、核心 Lua C 模块、所有 Lua 文件语法，并真正
 启动 Skynet，验证 sharetable 的循环图、重复引用、函数、lightuserdata、只读保护
-和热更新，再完成监听 socket、`skynet.abort` 正常退出及 console stdin 命令测试。
+和热更新，再完成监听 socket、`skynet.abort` 正常退出、console stdin 命令及
+wepoll 8192-socket 容量测试。
 
 ## 已知边界
 
