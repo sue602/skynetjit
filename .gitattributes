@@ -1,0 +1,7 @@
+* text=auto
+*.bat text eol=crlf
+*.sh text eol=lf
+.gitmodules text eol=lf
+Makefile text eol=lf
+*.patch text eol=lf
+*.patch whitespace=-blank-at-eol,-space-before-tab

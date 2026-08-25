@@ -1,0 +1,8 @@
+[submodule "third_party/skynet-mingw"]
+	path = third_party/skynet-mingw
+	url = https://github.com/dpull/skynet-mingw.git
+	branch = master
+[submodule "third_party/luajit2"]
+	path = third_party/luajit2
+	url = https://github.com/openresty/luajit2.git
+	branch = v2.1-agentzh

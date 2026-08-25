@@ -1,0 +1,78 @@
+diff --git a/skynet-src/socket_poll.h b/skynet-src/socket_poll.h
+--- a/skynet-src/socket_poll.h
++++ b/skynet-src/socket_poll.h
+@@ -22,6 +22,6 @@ static int sp_wait(poll_fd, struct event *e, int max);
+ static void sp_nonblocking(int sock);
+ 
+-#ifdef __linux__
++#if defined(__linux__) || defined(_WIN32)
+ #include "socket_epoll.h"
+ #endif
+ 
+diff --git a/lualib/loader.lua b/lualib/loader.lua
+--- a/lualib/loader.lua
++++ b/lualib/loader.lua
+@@ -27,6 +27,8 @@ end
+ LUA_SERVICE = nil
+ package.path , LUA_PATH = LUA_PATH, nil
+ package.cpath , LUA_CPATH = LUA_CPATH, nil
++
++require "skynetjit.compat"
+ 
+ local service_path = string.match(pattern, "(.*/)[^/?]+$")
+ 
+diff --git a/lualib/skynet/db/mysql.lua b/lualib/skynet/db/mysql.lua
+--- a/lualib/skynet/db/mysql.lua
++++ b/lualib/skynet/db/mysql.lua
+@@ -578,7 +578,7 @@ local function _compose_stmt_execute(self, stmt, cursor_type, args)
+         local types_buf = ""
+         local values_buf = ""
+         --生成NULL位图
+-        local null_count = (arg_num + 7) // 8
++        local null_count = math.floor((arg_num + 7) / 8)
+         local null_map = ""
+         local field_index = 1
+         for i = 1, null_count do
+@@ -892,6 +892,6 @@ local function _parse_row_data_binary(data, cols, compact)
+     local ncols = #cols
+     -- 空位图,前两个bit系统保留 (列数量 + 7 + 2) / 8
+-    local null_count = (ncols + 9) // 8
++    local null_count = math.floor((ncols + 9) / 8)
+     local pos = 2 + null_count
+     local value
+ 
+diff --git a/service/debug_console.lua b/service/debug_console.lua
+--- a/service/debug_console.lua
++++ b/service/debug_console.lua
+@@ -440,9 +440,9 @@ local function task(session, address)
+ 		if t < 6000 then
+ 			return tostring(t/100) .. "s"
+ 		end
+-		local hour = t // (100*60*60)
++		local hour = math.floor(t / (100*60*60))
+ 		t = t - hour * 100 * 60 * 60
+-		local min = t // (100*60)
++		local min = math.floor(t / (100*60))
+ 		t = t - min * 100 * 60
+ 		local sec = t / 100
+ 		return string.format("%s%d:%.2gs",hour == 0 and "" or (hour .. ":"),min,sec)
+diff --git a/lualib-src/lua-crypt.c b/lualib-src/lua-crypt.c
+--- a/lualib-src/lua-crypt.c
++++ b/lualib-src/lua-crypt.c
+@@ -1019,13 +1019,12 @@ lxor_str(lua_State *L) {
+ 	if (len2 == 0) {
+ 		return luaL_error(L, "Can't xor empty string");
+ 	}
+-	luaL_Buffer b;
+-	char * buffer = luaL_buffinitsize(L, &b, len1);
++	char * buffer = (char *)lua_newuserdata(L, len1);
+ 	int i;
+ 	for (i=0;i<len1;i++) {
+ 		buffer[i] = s1[i] ^ s2[i % len2];
+ 	}
+-	luaL_addsize(&b, len1);
+-	luaL_pushresult(&b);
++	lua_pushlstring(L, buffer, len1);
++	lua_remove(L, -2);
+ 	return 1;
+ }
