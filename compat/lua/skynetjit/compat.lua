@@ -5,6 +5,93 @@ table.pack = table.pack or function(...)
 	return { n = select("#", ...), ... }
 end
 
+-- Lua-level raw operations need an escape hatch for immutable external table
+-- proxies. Native tables still use the original builtins unchanged.
+local native_next = next
+local native_rawget = rawget
+local native_rawset = rawset
+local native_table_insert = table.insert
+local native_table_remove = table.remove
+local native_table_sort = table.sort
+local native_table_move = table.move
+local proxy_operations = setmetatable({}, { __mode = "k" })
+local compatibility = {}
+local install_table_guards
+
+function compatibility.register_table_proxy(value, operations)
+	assert(type(value) == "table")
+	proxy_operations[value] = operations
+	install_table_guards()
+end
+
+local function proxy_hook(value, name)
+	if type(value) ~= "table" then
+		return nil
+	end
+	local operations = proxy_operations[value]
+	return operations and operations[name]
+end
+
+function _G.next(value, key)
+	local hook = proxy_hook(value, "next")
+	if hook then
+		return hook(value, key)
+	end
+	return native_next(value, key)
+end
+
+function _G.rawget(value, key)
+	local hook = proxy_hook(value, "rawget")
+	if hook then
+		return hook(value, key)
+	end
+	return native_rawget(value, key)
+end
+
+function _G.rawset(value, key, entry)
+	local hook = proxy_hook(value, "rawset")
+	if hook then
+		return hook(value, key, entry)
+	end
+	return native_rawset(value, key, entry)
+end
+
+local table_guards_installed = false
+install_table_guards = function()
+	if table_guards_installed then return end
+	table_guards_installed = true
+
+	function table.insert(value, ...)
+		local hook = proxy_hook(value, "rawset")
+		if hook then return hook(value, "table.insert") end
+		return native_table_insert(value, ...)
+	end
+
+	function table.remove(value, ...)
+		local hook = proxy_hook(value, "rawset")
+		if hook then return hook(value, "table.remove") end
+		return native_table_remove(value, ...)
+	end
+
+	function table.sort(value, ...)
+		local hook = proxy_hook(value, "rawset")
+		if hook then return hook(value, "table.sort") end
+		return native_table_sort(value, ...)
+	end
+
+	if native_table_move then
+		function table.move(source, first, last, target, destination)
+			destination = destination or source
+			local hook = proxy_hook(destination, "rawset")
+			if hook then return hook(destination, "table.move") end
+			if proxy_hook(source, "rawget") then
+				error("table.move cannot read a shared table proxy; use sharetable.copy", 2)
+			end
+			return native_table_move(source, first, last, target, destination)
+		end
+	end
+end
+
 math.maxinteger = math.maxinteger or 9007199254740991
 math.mininteger = math.mininteger or -9007199254740991
 math.tointeger = math.tointeger or function(value)
@@ -27,7 +114,7 @@ coroutine.close = coroutine.close or function(co)
 end
 
 if string.pack and string.unpack and string.packsize then
-	return true
+	return compatibility
 end
 
 local native_little_endian = ffi.abi("le")
@@ -343,4 +430,4 @@ function string.packsize(format)
 	return size
 end
 
-return true
+return compatibility

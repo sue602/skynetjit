@@ -1,13 +1,16 @@
 local skynet = require "skynet"
 local service = require "skynet.service"
 local core = require "skynet.sharedata.corelib"
+local codec = require "skynet.sharetable.codec"
+local compatibility = require "skynetjit.compat"
 
--- LuaJIT cannot safely reuse a Lua Table* across independent Lua states.
--- This backend stores immutable trees in sharedata's process-wide C heap and
--- exposes table proxies in each service while preserving sharetable's API.
+-- The stock sharetable shares Lua's internal Table* across states. LuaJIT's
+-- GC and JIT cannot safely do that, so this implementation shares an encoded
+-- object graph in sharedata's C heap and exposes immutable Lua table proxies.
 local function sharetable_service()
 	local skynet = require "skynet"
 	local core = require "skynet.sharedata.corelib"
+	local codec = require "skynet.sharetable.codec"
 	local files = {}
 	local retired = {}
 	local no_response = {}
@@ -22,36 +25,12 @@ local function sharetable_service()
 		end
 	end
 
-	local function validate_tree(value, seen, path)
-		if type(value) ~= "table" then
-			return
-		end
-		if seen[value] then
-			error("sharetable LuaJIT backend requires an acyclic tree; repeated table at " .. path)
-		end
-		seen[value] = true
-		for key, child in pairs(value) do
-			local key_type = type(key)
-			if key_type ~= "string" and
-				(key_type ~= "number" or math.tointeger(key) == nil) then
-				error("unsupported sharetable key type " .. key_type .. " at " .. path)
-			end
-			local child_type = type(child)
-			if child_type == "table" then
-				validate_tree(child, seen, path .. "." .. tostring(key))
-			elseif child_type ~= "nil" and child_type ~= "number" and
-				child_type ~= "string" and child_type ~= "boolean" then
-				error("unsupported sharetable value type " .. child_type .. " at " .. path)
-			end
-		end
-	end
-
-	local function install(name, value)
+	local function install(name, document)
 		assert(type(name) == "string")
-		assert(type(value) == "table", "sharetable source must return a table")
-		validate_tree(value, {}, name)
+		assert(type(document) == "table" and document.format == 2,
+			"invalid LuaJIT sharetable graph")
 
-		local object = core.host.new(value)
+		local object = core.host.new(document)
 		core.host.incref(object) -- owner reference held by files[name]
 		local old = files[name]
 		files[name] = object
@@ -73,23 +52,28 @@ local function sharetable_service()
 		assert(chunk, message)
 		local environment = setmetatable({}, { __index = _G })
 		setfenv(chunk, environment)
-		install(name, chunk(...))
+		install(name, codec.encode(chunk(...)))
+	end
+
+	local function decode_arguments(document)
+		local arguments = codec.decode(document)
+		return unpack(arguments, 1, arguments.n)
 	end
 
 	local command = {}
 
-	function command.loadtable(name, value)
-		install(name, value)
+	function command.loadgraph(name, document)
+		install(name, document)
 		return true
 	end
 
-	function command.loadfile(name, filename, ...)
-		load_source(name, "@" .. filename, ...)
+	function command.loadfile(name, filename, arguments)
+		load_source(name, "@" .. filename, decode_arguments(arguments))
 		return true
 	end
 
-	function command.loadstring(name, source, ...)
-		load_source(name, source, ...)
+	function command.loadstring(name, source, arguments)
+		load_source(name, source, decode_arguments(arguments))
 		return true
 	end
 
@@ -137,11 +121,121 @@ end
 
 local address
 local cache = setmetatable({}, { __mode = "v" })
-local records = {}
+local roots_by_name = {}
+local proxy_record = setmetatable({}, { __mode = "k" })
+
+local proxy_metatable = {}
+local proxy_for
+local decode
+
+local function get_address()
+	if not address then
+		address = service.new("sharetable_luajit", sharetable_service)
+	end
+	return address
+end
+
+local function node_for(record)
+	local node = record.view.document.nodes[record.id]
+	if node == nil then
+		error("shared table no longer exists after update", 3)
+	end
+	return node
+end
+
+local function decode_function(view, id)
+	local value = view.functions[id]
+	if value then
+		return value
+	end
+	local definition = assert(view.document.functions[id], "invalid shared function")
+	value = codec.unpack_function(definition[1], definition[2])
+	view.functions[id] = value
+	return value
+end
+
+function decode(view, descriptor)
+	local tag = descriptor[1]
+	local value = descriptor[2]
+	if tag == codec.NIL then
+		return nil
+	elseif tag == codec.NUMBER or tag == codec.STRING or tag == codec.BOOLEAN then
+		return value
+	elseif tag == codec.TABLE then
+		return proxy_for(view, value)
+	elseif tag == codec.LIGHTUSERDATA then
+		return codec.unpack_lightuserdata(value)
+	elseif tag == codec.FUNCTION then
+		return decode_function(view, value)
+	end
+	error("invalid shared value tag " .. tostring(tag), 3)
+end
+
+local function descriptor_matches(view, descriptor, key)
+	local tag = descriptor[1]
+	local value = descriptor[2]
+	if tag == codec.NUMBER then
+		return type(key) == "number" and key == value
+	elseif tag == codec.STRING then
+		return type(key) == "string" and key == value
+	elseif tag == codec.BOOLEAN then
+		return type(key) == "boolean" and key == value
+	elseif tag == codec.TABLE then
+		local record = proxy_record[key]
+		return record ~= nil and record.view == view and record.id == value
+	elseif tag == codec.FUNCTION then
+		return type(key) == "function" and decode_function(view, value) == key
+	elseif tag == codec.LIGHTUSERDATA then
+		local encoded = codec.pack_lightuserdata(key)
+		return encoded ~= nil and encoded == value
+	end
+	return false
+end
+
+local function find_entry(record, key)
+	local entries = node_for(record).entries
+	for index = 1, #entries do
+		local entry = entries[index]
+		if descriptor_matches(record.view, entry[1], key) then
+			return entry, index
+		end
+	end
+	return nil
+end
+
+local function proxy_index(object, key)
+	local record = assert(proxy_record[object], "invalid shared table proxy")
+	local entry = find_entry(record, key)
+	if entry then
+		return decode(record.view, entry[2])
+	end
+end
+
+local function proxy_next(object, key)
+	local record = assert(proxy_record[object], "invalid shared table proxy")
+	local entries = node_for(record).entries
+	local index = 1
+	if key ~= nil then
+		local entry
+		entry, index = find_entry(record, key)
+		if entry == nil then
+			error("invalid key to 'next'", 2)
+		end
+		index = index + 1
+	end
+	local entry = entries[index]
+	if entry then
+		return decode(record.view, entry[1]), decode(record.view, entry[2])
+	end
+end
+
+local function proxy_pairs(object)
+	return proxy_next, object, nil
+end
 
 local function proxy_ipairs_iterator(object, index)
 	index = index + 1
-	local value = object[index]
+	local value = proxy_index(object, index)
 	if value ~= nil then
 		return index, value
 	end
@@ -151,28 +245,60 @@ local function proxy_ipairs(object)
 	return proxy_ipairs_iterator, object, 0
 end
 
-local function configure_proxy(object)
-	local metatable = getmetatable(object)
-	if metatable and metatable.__ipairs == nil then
-		metatable.__ipairs = proxy_ipairs
+local function proxy_length(object)
+	return node_for(assert(proxy_record[object])).length
+end
+
+local function readonly_error(_, key)
+	error("attempt to change shared table key " .. tostring(key), 2)
+end
+
+proxy_metatable.__index = proxy_index
+proxy_metatable.__newindex = readonly_error
+proxy_metatable.__len = proxy_length
+proxy_metatable.__pairs = proxy_pairs
+proxy_metatable.__ipairs = proxy_ipairs
+proxy_metatable.__metatable = "skynet.sharetable"
+
+local proxy_operations = {
+	next = proxy_next,
+	rawget = proxy_index,
+	rawset = readonly_error,
+}
+
+function proxy_for(view, id)
+	local object = view.proxies[id]
+	if object then
+		return object
 	end
+	object = setmetatable({}, proxy_metatable)
+	compatibility.register_table_proxy(object, proxy_operations)
+	view.proxies[id] = object
+	proxy_record[object] = { view = view, id = id }
 	return object
 end
 
-local function get_address()
-	if not address then
-		address = service.new("sharetable_luajit", sharetable_service)
-	end
-	return address
+local function new_view(pointer)
+	local document = core.box(pointer)
+	assert(document.format == 2, "unsupported shared graph format")
+	local view = {
+		pointer = pointer,
+		document = document,
+		proxies = setmetatable({}, { __mode = "v" }),
+		functions = setmetatable({}, { __mode = "v" }),
+	}
+	local root = decode(view, document.root)
+	assert(type(root) == "table")
+	return root, view
 end
 
-local function remember(name, object, pointer)
-	local map = records[name]
-	if not map then
-		map = setmetatable({}, { __mode = "k" })
-		records[name] = map
+local function remember(name, object, view, pointer)
+	local roots = roots_by_name[name]
+	if not roots then
+		roots = setmetatable({}, { __mode = "k" })
+		roots_by_name[name] = roots
 	end
-	map[object] = true
+	roots[object] = view
 	cache[name] = object
 	skynet.send(get_address(), "lua", "confirm", pointer)
 	return object
@@ -183,27 +309,37 @@ local function box(name, pointer)
 		return nil
 	end
 	local current = cache[name]
-	if current and current.__obj == pointer then
-		skynet.send(get_address(), "lua", "confirm", pointer)
-		return current
+	if current then
+		local view = proxy_record[current].view
+		if view.pointer == pointer then
+			skynet.send(get_address(), "lua", "confirm", pointer)
+			return current
+		end
 	end
-	return remember(name, configure_proxy(core.box(pointer)), pointer)
+	local object, view = new_view(pointer)
+	return remember(name, object, view, pointer)
 end
 
 local sharetable = {}
 
+local function encode_arguments(...)
+	return codec.encode({ n = select("#", ...), ... })
+end
+
 function sharetable.loadtable(name, value)
-	assert(type(value) == "table")
-	return skynet.call(get_address(), "lua", "loadtable", name, value)
+	return skynet.call(get_address(), "lua", "loadgraph", name, codec.encode(value))
 end
 
 function sharetable.loadfile(filename, ...)
-	return skynet.call(get_address(), "lua", "loadfile", filename, filename, ...)
+	return skynet.call(get_address(), "lua", "loadfile", filename, filename,
+		encode_arguments(...))
 end
 
 function sharetable.loadstring(name, source, ...)
-	return skynet.call(get_address(), "lua", "loadstring", name, source, ...)
+	return skynet.call(get_address(), "lua", "loadstring", name, source,
+		encode_arguments(...))
 end
+
 
 function sharetable.query(name)
 	return box(name, skynet.call(get_address(), "lua", "query", name))
@@ -218,22 +354,53 @@ function sharetable.queryall(names)
 	return result
 end
 
+
 function sharetable.update(...)
-	for index = 1, select("#", ...) do
-		local name = select(index, ...)
-		local map = records[name]
-		if map then
+	for argument = 1, select("#", ...) do
+		local name = select(argument, ...)
+		local roots = roots_by_name[name]
+		if roots then
 			local pointer = skynet.call(get_address(), "lua", "query", name)
 			if pointer then
-				for object in pairs(map) do
-					if object.__obj ~= pointer then
-						core.update(object, pointer)
+				for _, view in pairs(roots) do
+					if view.pointer ~= pointer then
+						core.update(view.document, pointer)
+						view.pointer = pointer
+						view.functions = setmetatable({}, { __mode = "v" })
 					end
 				end
 				skynet.send(get_address(), "lua", "confirm", pointer)
 			end
 		end
 	end
+end
+
+local function copy_proxy(value, copies)
+	if type(value) ~= "table" or proxy_record[value] == nil then
+		return value
+	end
+	local result = copies[value]
+	if result then
+		return result
+	end
+	result = {}
+	copies[value] = result
+	local key
+	while true do
+		local next_key, next_value = proxy_next(value, key)
+		if next_key == nil then break end
+		result[copy_proxy(next_key, copies)] = copy_proxy(next_value, copies)
+		key = next_key
+	end
+	return result
+end
+
+-- Extension for C modules or Lua table-library functions that require a real
+-- table and intentionally bypass proxy metamethods.
+function sharetable.copy(value)
+	assert(type(value) == "table" and proxy_record[value] ~= nil,
+		"shared table proxy expected")
+	return copy_proxy(value, {})
 end
 
 return sharetable

@@ -119,6 +119,9 @@ cp "$ROOT_DIR/compat/lua/skynetjit/compat.lua" \
 	"$WORK_DIR/skynet/lualib/skynetjit/compat.lua"
 cp "$ROOT_DIR/compat/lua/skynet/sharetable.lua" \
 	"$WORK_DIR/skynet/lualib/skynet/sharetable.lua"
+mkdir -p "$WORK_DIR/skynet/lualib/skynet/sharetable"
+cp "$ROOT_DIR/compat/lua/skynet/sharetable/codec.lua" \
+	"$WORK_DIR/skynet/lualib/skynet/sharetable/codec.lua"
 
 echo "Building LuaJIT2 for x64..."
 make -C "$WORK_DIR/luajit2" -j"$JOBS" \
@@ -164,22 +167,26 @@ if [ "$RUN_TESTS" -eq 1 ]; then
 	echo "Running Skynet socket-loop runtime smoke test..."
 	(
 		cd "$OUT_DIR"
-		rm -f runtime-smoke.log
+		rm -f runtime-smoke.log runtime-smoke.ok
 		./skynet.exe ../../tests/runtime-config.lua > runtime-smoke.log 2>&1 &
 		SKYNET_PID=$!
 		SKYNET_DONE=0
 		for _ in $(seq 1 150); do
+			if [ -f runtime-smoke.ok ]; then
+				SKYNET_DONE=1
+				break
+			fi
 			if ! kill -0 "$SKYNET_PID" 2>/dev/null; then
 				SKYNET_DONE=1
 				break
 			fi
 			sleep 0.1
 		done
-		if [ "$SKYNET_DONE" -eq 0 ]; then
+		if [ "$SKYNET_DONE" -eq 0 ] || [ ! -f runtime-smoke.ok ]; then
 			kill "$SKYNET_PID" 2>/dev/null || true
 			wait "$SKYNET_PID" 2>/dev/null || true
 			cat runtime-smoke.log >&2
-			echo "Skynet runtime smoke test timed out" >&2
+			echo "Skynet runtime smoke test failed or timed out" >&2
 			exit 1
 		fi
 		if ! wait "$SKYNET_PID"; then

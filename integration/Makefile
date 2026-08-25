@@ -108,11 +108,13 @@ $(foreach name,$(CSERVICE),$(eval $(call CSERVICE_template,$(name))))
 
 $(LUA_CLIB_DIR)/skynet.so: \
 	$(addprefix $(SKYNET_DIR)/lualib-src/,$(LUA_CLIB_SKYNET)) \
-	$(COMPAT_LUA)/sharetable_stub.c $(SKYNET_DLL) $(COMPAT_LIB) \
+	$(COMPAT_LUA)/sharetable_stub.c $(COMPAT_LUA)/sharetable_bridge.c \
+	$(SKYNET_DLL) $(COMPAT_LIB) \
 	| $(LUA_CLIB_DIR)
 	$(CC) $(SKYNET_CFLAGS) $(SHARED) -o $@ \
 		$(addprefix $(SKYNET_DIR)/lualib-src/,$(LUA_CLIB_SKYNET)) \
 		$(COMPAT_LUA)/sharetable_stub.c \
+		$(COMPAT_LUA)/sharetable_bridge.c \
 		-I$(SKYNET_DIR)/service-src -I$(SKYNET_DIR)/lualib-src \
 		$(COMPAT_LIB) $(SKYNET_LINK) $(LUA_LIBS) $(SYSTEM_LIBS)
 
