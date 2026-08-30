@@ -1,7 +1,7 @@
 CC ?= x86_64-w64-mingw32-gcc
 AR ?= x86_64-w64-mingw32-ar
 RANLIB ?= x86_64-w64-mingw32-ranlib
-WINDOWS_FD_SETSIZE ?= 8192
+WINDOWS_FD_SETSIZE := 65535
 
 SKYNET_DIR ?= .
 LUAJIT_DIR ?= ../luajit2
@@ -18,7 +18,9 @@ CSERVICE_DIR := $(OUT)/cservice
 LUA_CLIB_DIR := $(OUT)/luaclib
 
 BASE_CFLAGS := -g -O2 -Wall -std=gnu99 -fno-strict-aliasing \
-	-DFD_SETSIZE=$(WINDOWS_FD_SETSIZE) -D_WIN32_WINNT=0x0601 \
+	-DFD_SETSIZE=$(WINDOWS_FD_SETSIZE) \
+	-DSKYNETJIT_FD_SETSIZE=$(WINDOWS_FD_SETSIZE) \
+	-D_WIN32_WINNT=0x0601 \
 	-I$(COMPAT_WIN) -I$(COMPAT_UPSTREAM) -I$(LUAJIT_SRC) \
 	-I$(SKYNET_DIR)/skynet-src
 BASE_CFLAGS += -Wno-unused-function -Wno-unused-parameter \
@@ -81,6 +83,7 @@ $(OBJ_DIR)/dlfcn.o: $(COMPAT_UPSTREAM)/dlfcn.c | $(OBJ_DIR)
 $(OBJ_DIR)/wepoll.o: $(COMPAT_UPSTREAM)/wepoll.c | $(OBJ_DIR)
 	$(CC) -g -O2 -Wall -std=gnu99 \
 		-DFD_SETSIZE=$(WINDOWS_FD_SETSIZE) \
+		-DSKYNETJIT_FD_SETSIZE=$(WINDOWS_FD_SETSIZE) \
 		-D_WIN32_WINNT=0x0601 -I$(COMPAT_UPSTREAM) -c $< -o $@
 
 $(COMPAT_LIB): $(OBJ_DIR)/win_compat.o $(OBJ_DIR)/dlfcn.o \

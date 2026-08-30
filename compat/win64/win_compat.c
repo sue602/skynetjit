@@ -427,9 +427,9 @@ static int
 translate_fd_set(fd_set *source, fd_set *target, struct select_map *map) {
 	u_int i;
 	int count = 0;
-	FD_ZERO(target);
 	if (source == NULL)
 		return 0;
+	FD_ZERO(target);
 	for (i = 0; i < source->fd_count; ++i) {
 		int token = (int)(intptr_t)source->fd_array[i];
 		SOCKET value = socket_value(token);
@@ -457,25 +457,71 @@ restore_fd_set(fd_set *destination, const fd_set *ready,
 int
 skynetjit_select(int nfds, fd_set *readfds, fd_set *writefds,
 	      fd_set *exceptfds, const struct timeval *timeout) {
-	fd_set real_read, real_write, real_except;
-	struct select_map read_map[FD_SETSIZE];
-	struct select_map write_map[FD_SETSIZE];
-	struct select_map except_map[FD_SETSIZE];
-	int read_count = translate_fd_set(readfds, &real_read, read_map);
-	int write_count = translate_fd_set(writefds, &real_write, write_map);
-	int except_count = translate_fd_set(exceptfds, &real_except, except_map);
+	/* FD_SETSIZE is 65535 in Win64 builds; keep these temporary sets off the
+	 * caller's thread stack and size the mapping arrays to the active entries.
+	 */
+	fd_set *real_read = NULL;
+	fd_set *real_write = NULL;
+	fd_set *real_except = NULL;
+	struct select_map *read_map = NULL;
+	struct select_map *write_map = NULL;
+	struct select_map *except_map = NULL;
+	int read_count;
+	int write_count;
+	int except_count;
 	int result;
 	(void)nfds;
-	result = select(0, readfds ? &real_read : NULL,
-			writefds ? &real_write : NULL,
-			exceptfds ? &real_except : NULL, timeout);
-	if (result == SOCKET_ERROR) {
-		set_errno_from_wsa(WSAGetLastError());
+	if ((readfds != NULL && readfds->fd_count > FD_SETSIZE) ||
+	    (writefds != NULL && writefds->fd_count > FD_SETSIZE) ||
+	    (exceptfds != NULL && exceptfds->fd_count > FD_SETSIZE)) {
+		errno = EINVAL;
 		return -1;
 	}
-	restore_fd_set(readfds, &real_read, read_map, read_count);
-	restore_fd_set(writefds, &real_write, write_map, write_count);
-	restore_fd_set(exceptfds, &real_except, except_map, except_count);
+	if (readfds != NULL) {
+		real_read = malloc(sizeof(*real_read));
+		if (readfds->fd_count != 0)
+			read_map = malloc(readfds->fd_count * sizeof(*read_map));
+	}
+	if (writefds != NULL) {
+		real_write = malloc(sizeof(*real_write));
+		if (writefds->fd_count != 0)
+			write_map = malloc(writefds->fd_count * sizeof(*write_map));
+	}
+	if (exceptfds != NULL) {
+		real_except = malloc(sizeof(*real_except));
+		if (exceptfds->fd_count != 0)
+			except_map = malloc(exceptfds->fd_count * sizeof(*except_map));
+	}
+	if ((readfds != NULL &&
+		(real_read == NULL || (readfds->fd_count != 0 && read_map == NULL))) ||
+	    (writefds != NULL &&
+		(real_write == NULL || (writefds->fd_count != 0 && write_map == NULL))) ||
+	    (exceptfds != NULL &&
+		(real_except == NULL || (exceptfds->fd_count != 0 && except_map == NULL)))) {
+		errno = ENOMEM;
+		result = -1;
+		goto done;
+	}
+	read_count = translate_fd_set(readfds, real_read, read_map);
+	write_count = translate_fd_set(writefds, real_write, write_map);
+	except_count = translate_fd_set(exceptfds, real_except, except_map);
+	result = select(0, real_read, real_write, real_except, timeout);
+	if (result == SOCKET_ERROR) {
+		set_errno_from_wsa(WSAGetLastError());
+		result = -1;
+		goto done;
+	}
+	restore_fd_set(readfds, real_read, read_map, read_count);
+	restore_fd_set(writefds, real_write, write_map, write_count);
+	restore_fd_set(exceptfds, real_except, except_map, except_count);
+
+done:
+	free(read_map);
+	free(write_map);
+	free(except_map);
+	free(real_read);
+	free(real_write);
+	free(real_except);
 	return result;
 }
 
