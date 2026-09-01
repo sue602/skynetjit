@@ -127,7 +127,8 @@ local function run()
 	assert(not pcall(sharetable.loadtable, "unsupported_userdata", { io.stdout }),
 		"full userdata must be rejected")
 
-	local id = assert(socket.listen("127.0.0.1", 25261))
+	local id, _, port = assert(socket.listen("127.0.0.1", 0))
+	assert(port > 0, "socket.listen must allocate an ephemeral port")
 	socket.start(id)
 	socket.close(id)
 

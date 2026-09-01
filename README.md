@@ -79,6 +79,9 @@ skynet.exe examples\config
 
 ## 实现说明
 
+- 默认构建会同步 `skynet-mingw` 所引用的嵌套 `cloudwu/skynet` 的 `master`；使用
+  `--offline` 时则严格使用外层子模块记录的嵌套提交，适用于无网络的可复现构建。
+
 - `compat/win64` 提供 Win64 `SOCKET`/`HANDLE` 到 Skynet 整型描述符的线程安全映射，
   并封装 socket、pipe、select 和 wepoll 调用，避免在 x64 下截断句柄；控制台 stdin
   通过读取线程和 loopback socketpair 接入 wepoll。
