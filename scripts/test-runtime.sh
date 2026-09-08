@@ -6,10 +6,12 @@ ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 case "${1:-}" in
 	windows) EXE_SUFFIX=.exe; DEFAULT_OUT="$ROOT_DIR/build/out" ;;
 	linux) EXE_SUFFIX=; DEFAULT_OUT="$ROOT_DIR/build/linux-out" ;;
-	*) echo "Usage: $0 windows|linux [output-directory]" >&2; exit 2 ;;
+	*) echo "Usage: $0 windows|linux [output-directory] [epoll|uring]" >&2; exit 2 ;;
 esac
 PLATFORM=$1
 OUT_DIR=${2:-$DEFAULT_OUT}
+BACKEND=${3:-epoll}
+case "$BACKEND" in epoll|uring) ;; *) echo "Unknown backend: $BACKEND" >&2; exit 2 ;; esac
 cd "$OUT_DIR"
 # Both supported output directories live two levels below the project root. A
 # relative path works for native Windows binaries as well as Linux/WSL, while
@@ -63,6 +65,15 @@ rm -f runtime-smoke.ok
 run_skynet_exit_test "$TEST_DIR/runtime-config.lua" runtime-smoke.log
 test -f runtime-smoke.ok
 grep -q "runtime-smoke: Skynet socket loop succeeded" runtime-smoke.log
+if [ "$BACKEND" = uring ]; then
+	grep -q "io_uring completion backend enabled" runtime-smoke.log
+	echo "Running completion-driven io_uring TCP and UDP round-trip tests..."
+	rm -f uring-socket.ok
+	run_skynet_exit_test "$TEST_DIR/uring-config.lua" uring-socket.log
+	test -f uring-socket.ok
+	grep -q "io_uring completion backend enabled" uring-socket.log
+	grep -q "uring-socket: completion-driven TCP and UDP round trips succeeded" uring-socket.log
+fi
 
 echo "Running graceful abort smoke test..."
 rm -f abort-smoke.ok
@@ -79,7 +90,15 @@ if [ "$PLATFORM" = windows ]; then
 	grep -q "LAUNCH snlua console" console-smoke.log
 	grep -q "abort-smoke: graceful shutdown requested" console-smoke.log
 
-	echo "Running wepoll 8192-socket capacity smoke test..."
+fi
+
+if [ "$PLATFORM" = windows ] || [ "$BACKEND" = uring ]; then
+	if [ "$PLATFORM" = windows ]; then
+		capacity_backend=wepoll
+	else
+		capacity_backend=io_uring
+	fi
+	echo "Running $capacity_backend 8192-socket capacity smoke test..."
 	rm -f socket-capacity.ok
 	run_skynet_exit_test "$TEST_DIR/socket-capacity-config.lua" \
 		socket-capacity.log '' 600

@@ -57,10 +57,17 @@ Linux 使用独立的一键脚本，产物位于 `build/linux-out`，不与 Wind
 ./build-linux.sh
 ```
 
-Linux 当前使用原生 epoll。此前仅覆盖 poll 的 io_uring 试验层已移除：它没有把
-`accept/recv/send` 重构为 completion-driven I/O，继续保留会造成“已支持 io_uring”
-的误解。若要引入 io_uring，必须以 Skynet socket server 的完整完成队列模型单独设计和
-实现，而不是在现有 poll 接口上套一层适配器。
+默认后端是原生 epoll。Linux/WSL 上可以显式选择完成队列驱动的 io_uring 后端：
+
+```bash
+sudo apt install liburing-dev pkg-config
+./build-linux.sh --backend uring
+```
+
+该后端不是在 poll 接口上的适配层：TCP 的 accept、connect、recv、send 以及 UDP 的
+recvmsg、sendmsg 都通过 io_uring CQE 完成；控制管道仍用一个 `POLL_ADD` 请求来唤醒
+Skynet 的命令队列。若内核不能创建 io_uring，构建产物会在启动时失败，不会静默回退到
+epoll。Windows 只支持 wepoll 后端。
 
 常用选项：
 
@@ -68,6 +75,7 @@ Linux 当前使用原生 epoll。此前仅覆盖 poll 的 io_uring 试验层已�
 - `--no-sync`：不检查或切换子模块，直接使用当前已检出的提交；适合 WSL 与
   Windows 共享同一工作区时的本地验证；
 - `--no-test`：只编译，不执行测试；
+- `--backend epoll|uring`：仅 Linux 可选，默认为 `epoll`；`uring` 需要 `liburing-dev`；
 - `--jobs N`：设置并行编译任务数。
 
 也可以只更新源码：
@@ -106,7 +114,8 @@ skynet.exe examples\config
   通过读取线程和 loopback socketpair 接入 wepoll。
 - Windows 构建将 WinSock `FD_SETSIZE` 统一设为 65535；Skynet socket 事件循环使用
   wepoll，且一键测试会同时创建并注册 8192 个 UDP socket 验证容量。
-- Linux 使用原生 epoll；仓库不再包含不完整的 io_uring poll 适配层。
+- Linux 默认使用 epoll，也可通过 `--backend uring` 启用独立的 completion-driven
+  io_uring socket 后端；补丁和实现文件只会复制到 `build/linux-work`，不会修改子模块。
 - Win64 I/O 包装保持 POSIX 的零长度 read/recv 立即返回语义，使 `skynet.abort`
   能够处理无 payload 的退出控制命令并完成线程回收。
 - `compat/luajit` 提供 Skynet 当前 Lua 5.4 C API 到 LuaJIT 2.1 API 的适配。
@@ -122,7 +131,9 @@ skynet.exe examples\config
 一键测试会验证 LuaJIT 环境、核心 Lua C 模块、所有 Lua 文件语法，并真正启动
 Skynet，验证 sharetable 的循环图、重复引用、函数、lightuserdata、只读保护和热更新，
 再完成监听 socket 与 `skynet.abort` 正常退出。Windows 额外验证 console stdin 命令和
-wepoll 8192-socket 容量；Linux 运行同一套运行时与退出测试。
+wepoll 8192-socket 容量；Linux 运行同一套运行时与退出测试。选择 `uring` 时还会验证
+TCP 和 UDP 回环往返，覆盖 accept/connect/recv/send/recvmsg/sendmsg 的完成事件路径，
+并验证 8192 个 UDP socket 的并发注册。
 
 ## 已知边界
 
@@ -142,5 +153,8 @@ wepoll 8192-socket 容量；Linux 运行同一套运行时与退出测试。
   不能把内部图编码当成可落盘或跨进程交换的格式。
 - LuaJIT 采用 Lua 5.1 数值模型。兼容层覆盖了 Skynet 当前源码所需接口，但依赖
   Lua 5.4 精确 64 位整数语义或 to-be-closed 变量的第三方业务代码仍需单独适配。
+- io_uring 后端当前为每个 socket 保留一个在途 read/accept/connect 请求和一个有序写请求，
+  以保持 Skynet 的消息顺序与关闭语义；尚未使用 multishot、buffer selection、注册缓冲区
+  或零拷贝发送等更激进的内核特性。
 - 上游最新代码将来如果改变被补丁覆盖的上下文，构建会立即失败并提示补丁未应用，
   需要同步更新本仓库兼容层。

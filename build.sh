@@ -24,6 +24,11 @@ USAGE
 
 parse_build_options "$@"
 
+if [ "$SOCKET_BACKEND" != epoll ]; then
+	echo "The io_uring backend is available only to build-linux.sh." >&2
+	exit 2
+fi
+
 to_msys_path() {
 	case "$1" in
 		[A-Za-z]:/*|[A-Za-z]:\\*)

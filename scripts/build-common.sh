@@ -4,6 +4,7 @@
 parse_build_options() {
 	SYNC_MODE=update
 	RUN_TESTS=1
+	SOCKET_BACKEND=epoll
 	JOBS=${NUMBER_OF_PROCESSORS:-2}
 	if command -v nproc >/dev/null 2>&1; then
 		JOBS=$(nproc)
@@ -13,6 +14,11 @@ parse_build_options() {
 			--offline) SYNC_MODE=offline ;;
 			--no-sync) SYNC_MODE=current ;;
 			--no-test) RUN_TESTS=0 ;;
+			--backend)
+				shift
+				[ "$#" -gt 0 ] || { echo "--backend needs a value" >&2; exit 2; }
+				SOCKET_BACKEND=$1
+				;;
 			--jobs)
 				shift
 				[ "$#" -gt 0 ] || { echo "--jobs needs a value" >&2; exit 2; }
@@ -26,6 +32,10 @@ parse_build_options() {
 	case "$JOBS" in
 		''|*[!0-9]*|0) echo "--jobs must be a positive integer" >&2; exit 2 ;;
 	esac
+	case "$SOCKET_BACKEND" in
+		epoll|uring) ;;
+		*) echo "--backend must be epoll or uring" >&2; exit 2 ;;
+	esac
 }
 
 common_usage() {
@@ -33,7 +43,8 @@ common_usage() {
 Options:
   --offline       Use recorded submodule revisions without fetching updates.
   --no-sync       Use the already checked-out revisions without changing them.
-  --no-test       Build only; skip smoke and Lua syntax tests.
+	--no-test       Build only; skip smoke and Lua syntax tests.
+	--backend NAME  Linux socket backend: epoll (default) or uring.
   --jobs N        Parallel build jobs (defaults to CPU count).
   --help          Show this help.
 USAGE
@@ -82,6 +93,10 @@ prepare_sources() {
 		grep -q 'require "skynetjit.compat"' lualib/loader.lua
 	)
 	cp -a "$ROOT_DIR/compat/lua/." "$WORK_DIR/skynet/lualib/"
+	if [ "$SOCKET_BACKEND" = uring ]; then
+		cp "$ROOT_DIR/compat/linux/socket_uring.h" "$WORK_DIR/skynet/skynet-src/"
+		cp "$ROOT_DIR/compat/linux/socket_uring.inc" "$WORK_DIR/skynet/skynet-src/"
+	fi
 }
 
 copy_runtime_lua() {
