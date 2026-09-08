@@ -113,7 +113,7 @@ skynet.exe examples\config
   并封装 socket、pipe、select 和 wepoll 调用，避免在 x64 下截断句柄；控制台 stdin
   通过读取线程和 loopback socketpair 接入 wepoll。
 - Windows 构建将 WinSock `FD_SETSIZE` 统一设为 65535；Skynet socket 事件循环使用
-  wepoll，且一键测试会同时创建并注册 8192 个 UDP socket 验证容量。
+  wepoll，且一键测试会同时创建并注册 65535 个 UDP socket 验证容量。
 - Linux 默认使用 epoll，也可通过 `--backend uring` 启用独立的 completion-driven
   io_uring socket 后端。该后端为空闲 socket 的 recv/recvmsg 使用 `POLL_FIRST`，避免一次
   无效的直接收包尝试；补丁和实现文件只会复制到 `build/linux-work`，不会修改子模块。
@@ -132,9 +132,11 @@ skynet.exe examples\config
 一键测试会验证 LuaJIT 环境、核心 Lua C 模块、所有 Lua 文件语法，并真正启动
 Skynet，验证 sharetable 的循环图、重复引用、函数、lightuserdata、只读保护和热更新，
 再完成监听 socket 与 `skynet.abort` 正常退出。Windows 额外验证 console stdin 命令和
-wepoll 8192-socket 容量；Linux 运行同一套运行时与退出测试。选择 `uring` 时还会验证
+wepoll 65535-socket 容量；Linux 运行同一套运行时与退出测试。选择 `uring` 时还会验证
 TCP 和 UDP 回环往返，覆盖 accept/connect/recv/send/recvmsg/sendmsg 的完成事件路径，
-并验证 8192 个 UDP socket 的并发注册。
+并验证 8192 个 UDP socket 的并发注册。Linux 如需把容量回归提高到 65535，可设置
+`SKYNETJIT_SOCKET_CAPACITY=65535`；这会为每个空闲 UDP socket 保留 65535-byte 接收
+缓冲区，约需 4 GiB 内存，并要求足够高的 `ulimit -n`。
 
 ## 已知边界
 

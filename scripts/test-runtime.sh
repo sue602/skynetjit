@@ -98,14 +98,47 @@ fi
 if [ "$PLATFORM" = windows ] || [ "$BACKEND" = uring ]; then
 	if [ "$PLATFORM" = windows ]; then
 		capacity_backend=wepoll
+		capacity_default=65535
+		capacity_timeout_tenths=2400
 	else
 		capacity_backend=io_uring
+		# Each idle UDP receive owns a 65535-byte buffer in the completion backend.
+		# Keep the regular Linux regression memory-bounded; callers can opt into a
+		# larger run with SKYNETJIT_SOCKET_CAPACITY after raising their rlimits.
+		capacity_default=8192
+		capacity_timeout_tenths=600
 	fi
-	echo "Running $capacity_backend 8192-socket capacity smoke test..."
+	capacity_count=${SKYNETJIT_SOCKET_CAPACITY:-$capacity_default}
+	case "$capacity_count" in
+		''|*[!0-9]*) echo "SKYNETJIT_SOCKET_CAPACITY must be numeric" >&2; exit 2 ;;
+	esac
+	if [ "$capacity_count" -lt 1 ] || [ "$capacity_count" -gt 65535 ]; then
+		echo "SKYNETJIT_SOCKET_CAPACITY must be between 1 and 65535" >&2
+		exit 2
+	fi
+	if [ "$PLATFORM" = linux ] && [ "$capacity_count" -gt 8192 ]; then
+		# Submitting tens of thousands of persistent recvmsg requests is materially
+		# slower than the bounded smoke test, especially on WSL-backed filesystems.
+		capacity_timeout_tenths=6000
+	fi
+	if [ "$PLATFORM" = linux ]; then
+		required_nofile=$((capacity_count + 1024))
+		current_nofile=$(ulimit -n)
+		if [ "$current_nofile" -lt "$required_nofile" ]; then
+			ulimit -n "$required_nofile" 2>/dev/null || true
+			current_nofile=$(ulimit -n)
+			if [ "$current_nofile" -lt "$required_nofile" ]; then
+				echo "io_uring capacity test needs ulimit -n >= $required_nofile" >&2
+				exit 1
+			fi
+		fi
+	fi
+	export SKYNETJIT_SOCKET_CAPACITY=$capacity_count
+	echo "Running $capacity_backend $capacity_count-socket capacity smoke test..."
 	rm -f socket-capacity.ok
 	run_skynet_exit_test "$TEST_DIR/socket-capacity-config.lua" \
-		socket-capacity.log '' 600
+		socket-capacity.log '' "$capacity_timeout_tenths"
 	test -f socket-capacity.ok
-	grep -q "socket-capacity: 8192 sockets registered" socket-capacity.log
+	grep -q "socket-capacity: $capacity_count sockets registered" socket-capacity.log
 fi
 echo "Tests passed ($PLATFORM)."

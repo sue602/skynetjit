@@ -1,7 +1,10 @@
 local skynet = require "skynet"
 local socket = require "skynet.socket"
 
-local SOCKET_COUNT = 8192
+local SOCKET_COUNT = tonumber(os.getenv("SKYNETJIT_SOCKET_CAPACITY")) or 8192
+assert(SOCKET_COUNT == math.floor(SOCKET_COUNT) and
+	SOCKET_COUNT > 0 and SOCKET_COUNT <= 65535,
+	"SKYNETJIT_SOCKET_CAPACITY must be an integer from 1 through 65535")
 
 local function close_all(sockets)
 	for index, id in ipairs(sockets) do
