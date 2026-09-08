@@ -48,7 +48,7 @@ export MINGW64_ROOT=/c/mingw64
 ./build.sh
 ```
 
-## Linux 构建与 socket 后端
+## Linux 构建
 
 Linux 使用独立的一键脚本，产物位于 `build/linux-out`，不与 Windows
 `build/out` 混用。需要原生 Linux GCC、make、Git 和常用开发头文件：
@@ -57,18 +57,10 @@ Linux 使用独立的一键脚本，产物位于 `build/linux-out`，不与 Wind
 ./build-linux.sh
 ```
 
-默认 `--backend auto` 使用原生 epoll。当前 `uring` 是用于验证 ring 初始化、
-CQE 生命周期及 epoll 回退的实验性 poll 适配层，尚未将 `accept/recv/send` 改为
-completion-driven I/O，因此不应作为性能部署后端。可明确指定：
-
-```bash
-./build-linux.sh --backend epoll
-./build-linux.sh --backend uring
-```
-
-`uring` 模式需要安装 `liburing` 开发包（例如 Debian/Ubuntu 的
-`liburing-dev`）；缺失时脚本会报出依赖错误。该实验后端若运行时无法创建 ring，
-会输出提示并回退到原生 epoll。
+Linux 当前使用原生 epoll。此前仅覆盖 poll 的 io_uring 试验层已移除：它没有把
+`accept/recv/send` 重构为 completion-driven I/O，继续保留会造成“已支持 io_uring”
+的误解。若要引入 io_uring，必须以 Skynet socket server 的完整完成队列模型单独设计和
+实现，而不是在现有 poll 接口上套一层适配器。
 
 常用选项：
 
@@ -86,13 +78,16 @@ completion-driven I/O，因此不应作为性能部署后端。可明确指定�
 
 ## 构建产物
 
-主要文件均在 `build/out`：
+Windows 主要文件在 `build/out`：
 
 - `skynet.exe`、`skynet.dll`；
 - `luajit.exe`、`lua51.dll`；
 - `cservice/*.so`；
 - `luaclib/*.so`；
 - Skynet 的 `lualib`、`service` 和 `examples`。
+
+Linux 对应文件在 `build/linux-out`，包括 `skynet`、`libskynet.so`、`luajit`、
+`libluajit.so`、`cservice/*.so`、`luaclib/*.so` 和同一套 Lua 运行时文件。
 
 从输出目录启动自己的配置，例如：
 
@@ -111,8 +106,7 @@ skynet.exe examples\config
   通过读取线程和 loopback socketpair 接入 wepoll。
 - Windows 构建将 WinSock `FD_SETSIZE` 统一设为 65535；Skynet socket 事件循环使用
   wepoll，且一键测试会同时创建并注册 8192 个 UDP socket 验证容量。
-- Linux 的默认后端是原生 epoll；`compat/linux/socket_uring.h` 是项目维护的实验性
-  io_uring poll 适配层。它仅在构建工作副本中复制到 `skynet-src`，不修改任一子模块。
+- Linux 使用原生 epoll；仓库不再包含不完整的 io_uring poll 适配层。
 - Win64 I/O 包装保持 POSIX 的零长度 read/recv 立即返回语义，使 `skynet.abort`
   能够处理无 payload 的退出控制命令并完成线程回收。
 - `compat/luajit` 提供 Skynet 当前 Lua 5.4 C API 到 LuaJIT 2.1 API 的适配。
@@ -125,10 +119,10 @@ skynet.exe examples\config
 - `patches/skynet-luajit.patch` 只应用到 `build/work`，不会污染子模块。
 - 构建使用 `NOUSE_JEMALLOC`，所以不需要初始化 Skynet 的 jemalloc 子模块。
 
-一键测试会验证 PE/x64 LuaJIT 环境、核心 Lua C 模块、所有 Lua 文件语法，并真正
-启动 Skynet，验证 sharetable 的循环图、重复引用、函数、lightuserdata、只读保护
-和热更新，再完成监听 socket、`skynet.abort` 正常退出、console stdin 命令及
-wepoll 8192-socket 容量测试。
+一键测试会验证 LuaJIT 环境、核心 Lua C 模块、所有 Lua 文件语法，并真正启动
+Skynet，验证 sharetable 的循环图、重复引用、函数、lightuserdata、只读保护和热更新，
+再完成监听 socket 与 `skynet.abort` 正常退出。Windows 额外验证 console stdin 命令和
+wepoll 8192-socket 容量；Linux 运行同一套运行时与退出测试。
 
 ## 已知边界
 

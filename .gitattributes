@@ -3,5 +3,6 @@
 *.sh text eol=lf
 .gitmodules text eol=lf
 Makefile text eol=lf
+*.mk text eol=lf
 *.patch text eol=lf
 *.patch whitespace=-blank-at-eol,-space-before-tab
