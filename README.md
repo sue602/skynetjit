@@ -48,6 +48,29 @@ export MINGW64_ROOT=/c/mingw64
 ./build.sh
 ```
 
+## Linux 构建与 socket 后端
+
+Linux 使用独立的一键脚本，产物位于 `build/linux-out`，不与 Windows
+`build/out` 混用。需要原生 Linux GCC、make、Git 和常用开发头文件：
+
+```bash
+./build-linux.sh
+```
+
+默认 `--backend auto`：若 `pkg-config` 能找到 `liburing`，构建 io_uring
+poll 后端；否则构建原生 epoll。也可明确指定：
+
+```bash
+./build-linux.sh --backend epoll
+./build-linux.sh --backend uring
+```
+
+`uring` 模式需要安装 `liburing` 开发包（例如 Debian/Ubuntu 的
+`liburing-dev`）；缺失时脚本会报出依赖错误。自动模式在构建期选择 epoll，
+而已编入的 io_uring 后端若运行时无法创建 ring，也会输出提示并回退到原生
+epoll。两种路径均使用同一份 Skynet 非阻塞 socket 状态机；io_uring 当前负责
+poll 就绪事件，不会改变 accept/recv/send 的既有语义。
+
 常用选项：
 
 - `--offline`：不访问远端，使用当前子模块提交；
@@ -87,6 +110,8 @@ skynet.exe examples\config
   通过读取线程和 loopback socketpair 接入 wepoll。
 - Windows 构建将 WinSock `FD_SETSIZE` 统一设为 65535；Skynet socket 事件循环使用
   wepoll，且一键测试会同时创建并注册 8192 个 UDP socket 验证容量。
+- Linux 的默认后端是原生 epoll；`compat/linux/socket_uring.h` 是项目维护的可选
+  io_uring poll 适配层。它仅在构建工作副本中复制到 `skynet-src`，不修改任一子模块。
 - Win64 I/O 包装保持 POSIX 的零长度 read/recv 立即返回语义，使 `skynet.abort`
   能够处理无 payload 的退出控制命令并完成线程回收。
 - `compat/luajit` 提供 Skynet 当前 Lua 5.4 C API 到 LuaJIT 2.1 API 的适配。

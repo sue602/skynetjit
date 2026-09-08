@@ -135,7 +135,7 @@ local function run()
 	local success_file = assert(io.open("runtime-smoke.ok", "wb"))
 	success_file:write("ok\n")
 	success_file:close()
-	io.stdout:write("runtime-smoke: Skynet x64 socket loop succeeded\n")
+	io.stdout:write("runtime-smoke: Skynet socket loop succeeded\n")
 	io.stdout:flush()
 	return true
 end

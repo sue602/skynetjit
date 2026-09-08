@@ -1,11 +1,13 @@
 diff --git a/skynet-src/socket_poll.h b/skynet-src/socket_poll.h
 --- a/skynet-src/socket_poll.h
 +++ b/skynet-src/socket_poll.h
-@@ -22,6 +22,6 @@ static int sp_wait(poll_fd, struct event *e, int max);
+@@ -22,6 +22,8 @@ static int sp_wait(poll_fd, struct event *e, int max);
  static void sp_nonblocking(int sock);
  
 -#ifdef __linux__
-+#if defined(__linux__) || defined(_WIN32)
++#if defined(SKYNETJIT_USE_IO_URING)
++#include "socket_uring.h"
++#elif defined(__linux__) || defined(_WIN32)
  #include "socket_epoll.h"
  #endif
  

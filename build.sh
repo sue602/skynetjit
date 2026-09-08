@@ -230,7 +230,7 @@ if [ "$RUN_TESTS" -eq 1 ]; then
 			exit 1
 		fi
 		cat runtime-smoke.log
-		grep -q "runtime-smoke: Skynet x64 socket loop succeeded" runtime-smoke.log
+		grep -q "runtime-smoke: Skynet socket loop succeeded" runtime-smoke.log
 	)
 	echo "Running graceful abort smoke test..."
 	(
