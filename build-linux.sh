@@ -49,13 +49,11 @@ while [ "$#" -gt 0 ]; do
 	shift
 done
 
-case "$BACKEND" in
-	auto)
-		if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists liburing; then
-			BACKEND=uring
-		else
+	case "$BACKEND" in
+		auto)
+			# The poll-only io_uring adapter is intentionally opt-in. A full
+			# completion backend will replace it; stable builds use epoll.
 			BACKEND=epoll
-		fi
 		;;
 	epoll|uring) ;;
 	*) echo "Unknown socket backend: $BACKEND" >&2; exit 2 ;;
