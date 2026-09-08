@@ -73,6 +73,7 @@ if [ "$BACKEND" = uring ]; then
 	test -f uring-socket.ok
 	grep -q "io_uring completion backend enabled" uring-socket.log
 	grep -Eq "io_uring multishot accept (active|unavailable; using regular accept)" uring-socket.log
+	grep -Eq "io_uring send zerocopy (active|unavailable; using regular send)" uring-socket.log
 	grep -q "uring-socket: completion-driven TCP and UDP round trips succeeded" uring-socket.log
 fi
 

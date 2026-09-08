@@ -3,6 +3,7 @@ local socket = require "skynet.socket"
 
 skynet.start(function()
 	local accepted = 0
+	local bulk = string.rep("z", 256 * 1024)
 	local listener, _, port = assert(socket.listen("127.0.0.1", 0))
 	assert(port > 0)
 	socket.start(listener, function(client)
@@ -10,6 +11,7 @@ skynet.start(function()
 			assert(socket.start(client))
 			assert(socket.readline(client) == "ping")
 			socket.write(client, "pong\n")
+			socket.write(client, bulk)
 			socket.close(client)
 			accepted = accepted + 1
 		end)
@@ -25,6 +27,7 @@ skynet.start(function()
 		end
 		socket.write(client, "ping\n")
 		assert(socket.readline(client) == "pong")
+		assert(socket.read(client, #bulk) == bulk)
 		socket.close(client)
 	end
 	while accepted < 2 do

@@ -19,6 +19,8 @@ struct skynetjit_uring_op {
 	int opcode;
 	bool submitted;
 	bool cancelled;
+	bool zero_copy;
+	bool zero_copy_wait_notify;
 	char *buffer;
 	void (*release_buffer)(void *);
 	void *release_arg;
@@ -43,10 +45,27 @@ static bool SKYNETJIT_URING_CTRL_PENDING = false;
 #endif
 #endif
 
+#ifndef IORING_CQE_F_NOTIF
+#define IORING_CQE_F_NOTIF 0
+#endif
+
+#if defined(IORING_SEND_ZC_REPORT_USAGE) && IORING_CQE_F_NOTIF != 0
+#define SKYNETJIT_URING_HAVE_SEND_ZC 1
+#else
+#define SKYNETJIT_URING_HAVE_SEND_ZC 0
+#endif
+
+#ifndef SKYNETJIT_URING_ZC_MIN_SIZE
+#define SKYNETJIT_URING_ZC_MIN_SIZE (64 * 1024)
+#endif
+
 static bool SKYNETJIT_URING_MULTISHOT_ACCEPT =
 	SKYNETJIT_URING_HAVE_MULTISHOT_ACCEPT != 0;
 static bool SKYNETJIT_URING_MULTISHOT_ACCEPT_ANNOUNCED = false;
 static bool SKYNETJIT_URING_MULTISHOT_ACCEPT_FALLBACK_ANNOUNCED = false;
+static bool SKYNETJIT_URING_SEND_ZC = SKYNETJIT_URING_HAVE_SEND_ZC != 0;
+static bool SKYNETJIT_URING_SEND_ZC_ANNOUNCED = false;
+static bool SKYNETJIT_URING_SEND_ZC_FALLBACK_ANNOUNCED = false;
 
 static struct io_uring_sqe *
 skynetjit_uring_get_sqe(void) {
@@ -125,8 +144,18 @@ skynetjit_uring_submit_op(struct skynetjit_uring_op *op) {
 		io_uring_prep_recvmsg(sqe, op->fd, &op->msg, 0);
 		break;
 	case SKYNETJIT_URING_SEND:
-		io_uring_prep_send(sqe, op->fd, op->buffer + op->offset,
-			op->size - op->offset, MSG_NOSIGNAL);
+		if (SKYNETJIT_URING_SEND_ZC &&
+			op->size - op->offset >= SKYNETJIT_URING_ZC_MIN_SIZE) {
+#if SKYNETJIT_URING_HAVE_SEND_ZC
+			io_uring_prep_send_zc(sqe, op->fd, op->buffer + op->offset,
+				op->size - op->offset, MSG_NOSIGNAL, 0);
+			op->zero_copy = true;
+#endif
+		} else {
+			io_uring_prep_send(sqe, op->fd, op->buffer + op->offset,
+				op->size - op->offset, MSG_NOSIGNAL);
+			op->zero_copy = false;
+		}
 		break;
 	case SKYNETJIT_URING_SENDMSG:
 		io_uring_prep_sendmsg(sqe, op->fd, &op->msg, MSG_NOSIGNAL);
@@ -676,34 +705,14 @@ skynetjit_uring_finish_connect(struct socket_server *ss, struct skynetjit_uring_
 }
 
 static int
-skynetjit_uring_finish_write(struct socket_server *ss, struct skynetjit_uring_op *op,
-	int res, struct socket_message *result) {
-	struct socket *s = op->s;
+skynetjit_uring_finish_write_complete(struct socket_server *ss, struct socket *s,
+	struct skynetjit_uring_op *op, bool keep_buffer,
+	struct socket_message *result) {
 	assert(s->uring_write_active == op);
-	if (res <= 0 && op->size != 0) {
-		s->uring_write_active = NULL;
-		skynetjit_uring_free_op(op);
-		struct socket_lock l;
-		struct socket_message ignored;
-		socket_lock_init(s, &l);
-		force_close(ss, s, &l, &ignored);
-		return report_error(s, result, res < 0 ? strerror(-res) : "io_uring send returned zero");
-	}
-	if (res > 0) {
-		op->offset += res;
-		s->wb_size -= res;
-		stat_write(ss, s, res);
-	}
-	if (op->offset < op->size) {
-		if (skynetjit_uring_submit_op(op)) {
-			s->uring_write_active = NULL;
-			skynetjit_uring_free_op(op);
-			return report_error(s, result, "io_uring send resubmission failed");
-		}
-		return -1;
-	}
 	s->uring_write_active = NULL;
-	skynetjit_uring_free_op(op);
+	if (!keep_buffer) {
+		skynetjit_uring_free_op(op);
+	}
 	if (skynetjit_uring_start_write(ss, s)) {
 		return report_error(s, result, "io_uring send submission failed");
 	}
@@ -727,13 +736,100 @@ skynetjit_uring_finish_write(struct socket_server *ss, struct skynetjit_uring_op
 	return -1;
 }
 
+static void
+skynetjit_uring_disable_send_zc(void) {
+	SKYNETJIT_URING_SEND_ZC = false;
+	if (!SKYNETJIT_URING_SEND_ZC_FALLBACK_ANNOUNCED) {
+		skynet_error(NULL,
+			"[skynetjit] io_uring send zerocopy unavailable; using regular send");
+		SKYNETJIT_URING_SEND_ZC_FALLBACK_ANNOUNCED = true;
+	}
+}
+
+static int
+skynetjit_uring_finish_write(struct socket_server *ss, struct skynetjit_uring_op *op,
+	int res, unsigned cqe_flags, struct socket_message *result) {
+	struct socket *s = op->s;
+	if (op->zero_copy_wait_notify && (cqe_flags & IORING_CQE_F_NOTIF) != 0) {
+		op->zero_copy_wait_notify = false;
+		if (op->offset < op->size) {
+			if (skynetjit_uring_submit_op(op)) {
+				s->uring_write_active = NULL;
+				skynetjit_uring_free_op(op);
+				return report_error(s, result, "io_uring send resubmission failed");
+			}
+			return -1;
+		}
+		/* The payload was already ordered behind later writes; this CQE frees it. */
+		skynetjit_uring_free_op(op);
+		return -1;
+	}
+	assert(s->uring_write_active == op);
+	bool wait_notify = op->zero_copy && (cqe_flags & IORING_CQE_F_MORE) != 0;
+	if (op->zero_copy && (res == -EOPNOTSUPP || res == -EINVAL)) {
+		skynetjit_uring_disable_send_zc();
+		op->zero_copy = false;
+		if (wait_notify) {
+			op->zero_copy_wait_notify = true;
+			return -1;
+		}
+		if (skynetjit_uring_submit_op(op)) {
+			s->uring_write_active = NULL;
+			skynetjit_uring_free_op(op);
+			return report_error(s, result, "io_uring send fallback submission failed");
+		}
+		return -1;
+	}
+	if (res <= 0 && op->size != 0) {
+		s->uring_write_active = NULL;
+		if (wait_notify) {
+			op->zero_copy_wait_notify = true;
+		} else {
+			skynetjit_uring_free_op(op);
+		}
+		struct socket_lock l;
+		struct socket_message ignored;
+		socket_lock_init(s, &l);
+		force_close(ss, s, &l, &ignored);
+		return report_error(s, result, res < 0 ? strerror(-res) : "io_uring send returned zero");
+	}
+	if (res > 0) {
+		op->offset += res;
+		s->wb_size -= res;
+		stat_write(ss, s, res);
+	}
+	if (wait_notify && !SKYNETJIT_URING_SEND_ZC_ANNOUNCED) {
+		skynet_error(NULL,
+			"[skynetjit] io_uring send zerocopy active (threshold=%d)",
+			SKYNETJIT_URING_ZC_MIN_SIZE);
+		SKYNETJIT_URING_SEND_ZC_ANNOUNCED = true;
+	}
+	if (op->offset < op->size) {
+		if (wait_notify) {
+			op->zero_copy_wait_notify = true;
+			return -1;
+		}
+		if (skynetjit_uring_submit_op(op)) {
+			s->uring_write_active = NULL;
+			skynetjit_uring_free_op(op);
+			return report_error(s, result, "io_uring send resubmission failed");
+		}
+		return -1;
+	}
+	if (wait_notify) {
+		op->zero_copy_wait_notify = true;
+	}
+	return skynetjit_uring_finish_write_complete(ss, s, op, wait_notify, result);
+}
+
 static int
 skynetjit_uring_complete(struct socket_server *ss, struct skynetjit_uring_op *op,
 	int res, unsigned cqe_flags, struct socket_message *result) {
 	if (op == NULL) {
 		return -1;
 	}
-	op->submitted = op->opcode == SKYNETJIT_URING_ACCEPT &&
+	op->submitted = (op->opcode == SKYNETJIT_URING_ACCEPT ||
+		(op->opcode == SKYNETJIT_URING_SEND && op->zero_copy)) &&
 		(cqe_flags & IORING_CQE_F_MORE) != 0;
 	if (op->opcode == SKYNETJIT_URING_CTRL) {
 		SKYNETJIT_URING_CTRL_PENDING = false;
@@ -755,7 +851,7 @@ skynetjit_uring_complete(struct socket_server *ss, struct skynetjit_uring_op *op
 		return skynetjit_uring_finish_connect(ss, op, res, result);
 	case SKYNETJIT_URING_SEND:
 	case SKYNETJIT_URING_SENDMSG:
-		return skynetjit_uring_finish_write(ss, op, res, result);
+		return skynetjit_uring_finish_write(ss, op, res, cqe_flags, result);
 	default:
 		skynetjit_uring_free_op(op);
 		return -1;
