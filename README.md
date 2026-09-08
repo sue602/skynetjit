@@ -153,8 +153,9 @@ TCP 和 UDP 回环往返，覆盖 accept/connect/recv/send/recvmsg/sendmsg 的�
   不能把内部图编码当成可落盘或跨进程交换的格式。
 - LuaJIT 采用 Lua 5.1 数值模型。兼容层覆盖了 Skynet 当前源码所需接口，但依赖
   Lua 5.4 精确 64 位整数语义或 to-be-closed 变量的第三方业务代码仍需单独适配。
-- io_uring 后端当前为每个 socket 保留一个在途 read/accept/connect 请求和一个有序写请求，
-  以保持 Skynet 的消息顺序与关闭语义；尚未使用 multishot、buffer selection、注册缓冲区
-  或零拷贝发送等更激进的内核特性。
+- io_uring 后端当前为每个 socket 保留一个在途 read/connect 请求和一个有序写请求；监听
+  socket 使用 multishot accept，内核不支持时自动退回普通 io_uring accept。这保持了
+  Skynet 的消息顺序与关闭语义；read 的 multishot、buffer selection、注册缓冲区和
+  零拷贝发送等更激进的内核特性尚未启用。
 - 上游最新代码将来如果改变被补丁覆盖的上下文，构建会立即失败并提示补丁未应用，
   需要同步更新本仓库兼容层。

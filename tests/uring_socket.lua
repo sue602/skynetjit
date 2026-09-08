@@ -2,7 +2,7 @@ local skynet = require "skynet"
 local socket = require "skynet.socket"
 
 skynet.start(function()
-	local accepted = false
+	local accepted = 0
 	local listener, _, port = assert(socket.listen("127.0.0.1", 0))
 	assert(port > 0)
 	socket.start(listener, function(client)
@@ -11,19 +11,23 @@ skynet.start(function()
 			assert(socket.readline(client) == "ping")
 			socket.write(client, "pong\n")
 			socket.close(client)
-			accepted = true
+			accepted = accepted + 1
 		end)
 	end)
 	-- Allow the accept request to reach the ring before any client connects.
 	skynet.sleep(2)
 
-	local client = assert(socket.open("127.0.0.1", port))
-	-- Likewise, leave the server receive request pending before the send.
-	skynet.sleep(2)
-	socket.write(client, "ping\n")
-	assert(socket.readline(client) == "pong")
-	socket.close(client)
-	while not accepted do
+	for connection = 1, 2 do
+		local client = assert(socket.open("127.0.0.1", port))
+		-- Likewise, leave the server receive request pending before the first send.
+		if connection == 1 then
+			skynet.sleep(2)
+		end
+		socket.write(client, "ping\n")
+		assert(socket.readline(client) == "pong")
+		socket.close(client)
+	end
+	while accepted < 2 do
 		skynet.sleep(1)
 	end
 	socket.close(listener)

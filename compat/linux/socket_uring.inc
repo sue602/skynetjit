@@ -33,6 +33,21 @@ struct skynetjit_uring_op {
 static struct skynetjit_uring_op *SKYNETJIT_URING_OPS = NULL;
 static bool SKYNETJIT_URING_CTRL_PENDING = false;
 
+/* liburing headers from before Linux 5.19 can still build the regular path. */
+#if defined(IORING_ACCEPT_MULTISHOT) && defined(IORING_CQE_F_MORE)
+#define SKYNETJIT_URING_HAVE_MULTISHOT_ACCEPT 1
+#else
+#define SKYNETJIT_URING_HAVE_MULTISHOT_ACCEPT 0
+#ifndef IORING_CQE_F_MORE
+#define IORING_CQE_F_MORE 0
+#endif
+#endif
+
+static bool SKYNETJIT_URING_MULTISHOT_ACCEPT =
+	SKYNETJIT_URING_HAVE_MULTISHOT_ACCEPT != 0;
+static bool SKYNETJIT_URING_MULTISHOT_ACCEPT_ANNOUNCED = false;
+static bool SKYNETJIT_URING_MULTISHOT_ACCEPT_FALLBACK_ANNOUNCED = false;
+
 static struct io_uring_sqe *
 skynetjit_uring_get_sqe(void) {
 	struct io_uring_sqe *sqe = io_uring_get_sqe(&SKYNETJIT_URING);
@@ -117,8 +132,20 @@ skynetjit_uring_submit_op(struct skynetjit_uring_op *op) {
 		io_uring_prep_sendmsg(sqe, op->fd, &op->msg, MSG_NOSIGNAL);
 		break;
 	case SKYNETJIT_URING_ACCEPT:
-		io_uring_prep_accept(sqe, op->fd, &op->addr.s, &op->addrlen,
-			SOCK_NONBLOCK | SOCK_CLOEXEC);
+		if (SKYNETJIT_URING_MULTISHOT_ACCEPT) {
+			/*
+			 * A multishot request shares its address storage across completions.
+			 * Obtain the peer address with getpeername after each accept instead.
+			 */
+			io_uring_prep_accept(sqe, op->fd, NULL, NULL,
+				SOCK_NONBLOCK | SOCK_CLOEXEC);
+#if SKYNETJIT_URING_HAVE_MULTISHOT_ACCEPT
+			sqe->ioprio |= IORING_ACCEPT_MULTISHOT;
+#endif
+		} else {
+			io_uring_prep_accept(sqe, op->fd, &op->addr.s, &op->addrlen,
+				SOCK_NONBLOCK | SOCK_CLOEXEC);
+		}
 		break;
 	case SKYNETJIT_URING_CONNECT:
 		io_uring_prep_connect(sqe, op->fd, &op->addr.s, op->addrlen);
@@ -554,22 +581,46 @@ skynetjit_uring_finish_udp_read(struct socket_server *ss, struct skynetjit_uring
 
 static int
 skynetjit_uring_finish_accept(struct socket_server *ss, struct skynetjit_uring_op *op,
-	int res, struct socket_message *result) {
+	int res, unsigned cqe_flags, struct socket_message *result) {
 	struct socket *s = op->s;
-	s->uring_accept_pending = false;
+	bool more = (cqe_flags & IORING_CQE_F_MORE) != 0;
+	if (!more) {
+		s->uring_accept_pending = false;
+	}
 	if (res < 0) {
+		if (res == -EINVAL && SKYNETJIT_URING_MULTISHOT_ACCEPT) {
+			SKYNETJIT_URING_MULTISHOT_ACCEPT = false;
+			if (!SKYNETJIT_URING_MULTISHOT_ACCEPT_FALLBACK_ANNOUNCED) {
+				skynet_error(NULL,
+					"[skynetjit] io_uring multishot accept unavailable; using regular accept");
+				SKYNETJIT_URING_MULTISHOT_ACCEPT_FALLBACK_ANNOUNCED = true;
+			}
+			skynetjit_uring_free_op(op);
+			(void)skynetjit_uring_queue_accept(ss, s);
+			return -1;
+		}
 		skynetjit_uring_free_op(op);
-		if (res == -EINTR || res == -EAGAIN || res == -ECANCELED) {
+		if (res == -EINTR || res == -EAGAIN) {
+			(void)skynetjit_uring_queue_accept(ss, s);
+			return -1;
+		}
+		if (res == -ECANCELED) {
 			return -1;
 		}
 		return report_error(s, result, strerror(-res));
+	}
+	if (more && !SKYNETJIT_URING_MULTISHOT_ACCEPT_ANNOUNCED) {
+		skynet_error(NULL, "[skynetjit] io_uring multishot accept active");
+		SKYNETJIT_URING_MULTISHOT_ACCEPT_ANNOUNCED = true;
 	}
 	int client_fd = res;
 	int id = reserve_id(ss);
 	if (id < 0) {
 		close(client_fd);
-		skynetjit_uring_free_op(op);
-		(void)skynetjit_uring_queue_accept(ss, s);
+		if (!more) {
+			skynetjit_uring_free_op(op);
+			(void)skynetjit_uring_queue_accept(ss, s);
+		}
 		return -1;
 	}
 	socket_keepalive(client_fd);
@@ -577,8 +628,10 @@ skynetjit_uring_finish_accept(struct socket_server *ss, struct skynetjit_uring_o
 	if (ns == NULL) {
 		close(client_fd);
 		ATOM_STORE(&ss->slot[HASH_ID(id)].type, SOCKET_TYPE_INVALID);
-		skynetjit_uring_free_op(op);
-		(void)skynetjit_uring_queue_accept(ss, s);
+		if (!more) {
+			skynetjit_uring_free_op(op);
+			(void)skynetjit_uring_queue_accept(ss, s);
+		}
 		return -1;
 	}
 	ATOM_STORE(&ns->type, SOCKET_TYPE_PACCEPT);
@@ -587,11 +640,16 @@ skynetjit_uring_finish_accept(struct socket_server *ss, struct skynetjit_uring_o
 	result->id = s->id;
 	result->ud = id;
 	result->data = NULL;
-	if (getname(&op->addr, ss->buffer, sizeof(ss->buffer))) {
+	union sockaddr_all peer;
+	socklen_t peerlen = sizeof(peer);
+	if (getpeername(client_fd, &peer.s, &peerlen) == 0 &&
+		getname(&peer, ss->buffer, sizeof(ss->buffer))) {
 		result->data = ss->buffer;
 	}
-	skynetjit_uring_free_op(op);
-	(void)skynetjit_uring_queue_accept(ss, s);
+	if (!more) {
+		skynetjit_uring_free_op(op);
+		(void)skynetjit_uring_queue_accept(ss, s);
+	}
 	return SOCKET_ACCEPT;
 }
 
@@ -671,11 +729,12 @@ skynetjit_uring_finish_write(struct socket_server *ss, struct skynetjit_uring_op
 
 static int
 skynetjit_uring_complete(struct socket_server *ss, struct skynetjit_uring_op *op,
-	int res, struct socket_message *result) {
+	int res, unsigned cqe_flags, struct socket_message *result) {
 	if (op == NULL) {
 		return -1;
 	}
-	op->submitted = false;
+	op->submitted = op->opcode == SKYNETJIT_URING_ACCEPT &&
+		(cqe_flags & IORING_CQE_F_MORE) != 0;
 	if (op->opcode == SKYNETJIT_URING_CTRL) {
 		SKYNETJIT_URING_CTRL_PENDING = false;
 		skynetjit_uring_free_op(op);
@@ -691,7 +750,7 @@ skynetjit_uring_complete(struct socket_server *ss, struct skynetjit_uring_op *op
 	case SKYNETJIT_URING_RECVMSG:
 		return skynetjit_uring_finish_udp_read(ss, op, res, result);
 	case SKYNETJIT_URING_ACCEPT:
-		return skynetjit_uring_finish_accept(ss, op, res, result);
+		return skynetjit_uring_finish_accept(ss, op, res, cqe_flags, result);
 	case SKYNETJIT_URING_CONNECT:
 		return skynetjit_uring_finish_connect(ss, op, res, result);
 	case SKYNETJIT_URING_SEND:
@@ -723,8 +782,9 @@ skynetjit_uring_poll(struct socket_server *ss, struct socket_message *result, in
 		while (io_uring_peek_cqe(&SKYNETJIT_URING, &cqe) == 0) {
 			struct skynetjit_uring_op *op = io_uring_cqe_get_data(cqe);
 			int res = cqe->res;
+			unsigned cqe_flags = cqe->flags;
 			io_uring_cqe_seen(&SKYNETJIT_URING, cqe);
-			int type = skynetjit_uring_complete(ss, op, res, result);
+			int type = skynetjit_uring_complete(ss, op, res, cqe_flags, result);
 			if (type != -1) {
 				if (more != NULL) {
 					*more = 0;

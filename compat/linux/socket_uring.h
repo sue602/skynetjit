@@ -19,6 +19,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -36,6 +37,7 @@ struct skynetjit_uring_op;
 
 static struct io_uring SKYNETJIT_URING;
 static bool SKYNETJIT_URING_READY = false;
+static bool SKYNETJIT_URING_COOP_TASKRUN = false;
 
 static void skynetjit_uring_dispose(void);
 static int skynetjit_uring_poll(struct socket_server *, struct socket_message *, int *);
@@ -55,12 +57,37 @@ sp_invalid(poll_fd fd) {
 
 static poll_fd
 sp_create(void) {
-	if (io_uring_queue_init(SKYNETJIT_URING_QUEUE_DEPTH, &SKYNETJIT_URING, 0) < 0) {
+	int init_result;
+#ifdef IORING_SETUP_COOP_TASKRUN
+	struct io_uring_params params;
+	memset(&params, 0, sizeof(params));
+	/*
+	 * Socket I/O is driven by Skynet's one socket thread. Ask recent kernels
+	 * to run completion task work from that thread, avoiding cross-thread task
+	 * work when the ring is busy. Do not set SINGLE_ISSUER: creation and final
+	 * teardown run on Skynet's main thread, while submission runs on the socket
+	 * thread.
+	 */
+	params.flags = IORING_SETUP_COOP_TASKRUN;
+	init_result = io_uring_queue_init_params(SKYNETJIT_URING_QUEUE_DEPTH,
+		&SKYNETJIT_URING, &params);
+	SKYNETJIT_URING_COOP_TASKRUN = init_result >= 0;
+	if (init_result < 0) {
+		init_result = io_uring_queue_init(SKYNETJIT_URING_QUEUE_DEPTH,
+			&SKYNETJIT_URING, 0);
+	}
+#else
+	init_result = io_uring_queue_init(SKYNETJIT_URING_QUEUE_DEPTH,
+		&SKYNETJIT_URING, 0);
+#endif
+	if (init_result < 0) {
 		return -1;
 	}
 	SKYNETJIT_URING_READY = true;
-	fprintf(stderr, "[skynetjit] io_uring completion backend enabled (depth=%d)\n",
-		SKYNETJIT_URING_QUEUE_DEPTH);
+	fprintf(stderr,
+		"[skynetjit] io_uring completion backend enabled (depth=%d, taskrun=%s)\n",
+		SKYNETJIT_URING_QUEUE_DEPTH,
+		SKYNETJIT_URING_COOP_TASKRUN ? "cooperative" : "compatible");
 	return 0;
 }
 

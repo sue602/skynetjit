@@ -72,6 +72,7 @@ if [ "$BACKEND" = uring ]; then
 	run_skynet_exit_test "$TEST_DIR/uring-config.lua" uring-socket.log
 	test -f uring-socket.ok
 	grep -q "io_uring completion backend enabled" uring-socket.log
+	grep -Eq "io_uring multishot accept (active|unavailable; using regular accept)" uring-socket.log
 	grep -q "uring-socket: completion-driven TCP and UDP round trips succeeded" uring-socket.log
 fi
 
