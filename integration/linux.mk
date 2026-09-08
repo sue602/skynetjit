@@ -35,7 +35,7 @@ $(error SOCKET_BACKEND must be epoll or uring)
 endif
 
 SHARED := -shared
-LUA_LIBS := -L$(LUAJIT_SRC) -lluajit-5.1
+LUA_LIBS := -L$(LUAJIT_SRC) -lluajit
 SKYNET_LINK := -L$(OUT) -lskynet
 SYSTEM_LIBS := -pthread -lm -ldl
 RPATH := -Wl,-rpath,'$$ORIGIN'
@@ -77,7 +77,7 @@ $(OUT) $(OBJ_DIR) $(CSERVICE_DIR) $(LUA_CLIB_DIR):
 	mkdir -p $@
 
 $(SKYNET_SO): $(addprefix $(SKYNET_DIR)/skynet-src/,$(SKYNET_SRC)) \
-	$(LUAJIT_SRC)/libluajit-5.1.so | $(OUT)
+	$(LUAJIT_SRC)/libluajit.so | $(OUT)
 	$(CC) $(SKYNET_CFLAGS) $(BACKEND_CFLAGS) $(SHARED) -o $@ \
 		$(addprefix $(SKYNET_DIR)/skynet-src/,$(SKYNET_SRC)) \
 		$(LUA_LIBS) $(SYSTEM_LIBS) $(BACKEND_LIBS) -DNOUSE_JEMALLOC
@@ -114,26 +114,27 @@ $(LUA_CLIB_DIR)/client.so: $(SKYNET_DIR)/lualib-src/lua-clientsocket.c \
 		$(LUA_LIBS) $(SYSTEM_LIBS) $(BACKEND_LIBS) -Wl,-rpath,'$$ORIGIN/..'
 
 $(LUA_CLIB_DIR)/bson.so: $(SKYNET_DIR)/lualib-src/lua-bson.c | $(LUA_CLIB_DIR)
-	$(CC) $(SKYNET_CFLAGS) $(SHARED) -o $@ $< $(LUA_LIBS) $(SYSTEM_LIBS)
+	$(CC) $(SKYNET_CFLAGS) $(SHARED) -o $@ $< $(LUA_LIBS) $(SYSTEM_LIBS) \
+		-Wl,-rpath,'$$ORIGIN/..'
 
 $(LUA_CLIB_DIR)/md5.so: $(SKYNET_DIR)/3rd/lua-md5/md5.c \
 	$(SKYNET_DIR)/3rd/lua-md5/md5lib.c \
 	$(SKYNET_DIR)/3rd/lua-md5/compat-5.2.c | $(LUA_CLIB_DIR)
 	$(CC) $(LUA51_CFLAGS) $(SHARED) -I$(SKYNET_DIR)/3rd/lua-md5 \
-		-o $@ $^ $(LUA_LIBS) $(SYSTEM_LIBS)
+		-o $@ $^ $(LUA_LIBS) $(SYSTEM_LIBS) -Wl,-rpath,'$$ORIGIN/..'
 
 $(LUA_CLIB_DIR)/sproto.so: $(SKYNET_DIR)/lualib-src/sproto/sproto.c \
 	$(SKYNET_DIR)/lualib-src/sproto/lsproto.c | $(LUA_CLIB_DIR)
 	$(CC) $(LUA51_CFLAGS) -include $(COMPAT_LUA)/sproto_compat.h \
 		$(SHARED) -I$(SKYNET_DIR)/lualib-src/sproto -o $@ $^ \
-		$(LUA_LIBS) $(SYSTEM_LIBS)
+		$(LUA_LIBS) $(SYSTEM_LIBS) -Wl,-rpath,'$$ORIGIN/..'
 
 $(LUA_CLIB_DIR)/lpeg.so: $(SKYNET_DIR)/3rd/lpeg/lpcap.c \
 	$(SKYNET_DIR)/3rd/lpeg/lpcode.c $(SKYNET_DIR)/3rd/lpeg/lpprint.c \
 	$(SKYNET_DIR)/3rd/lpeg/lptree.c $(SKYNET_DIR)/3rd/lpeg/lpvm.c \
 	$(SKYNET_DIR)/3rd/lpeg/lpcset.c | $(LUA_CLIB_DIR)
 	$(CC) $(LUA51_CFLAGS) $(SHARED) -I$(SKYNET_DIR)/3rd/lpeg \
-		-o $@ $^ $(LUA_LIBS) $(SYSTEM_LIBS)
+		-o $@ $^ $(LUA_LIBS) $(SYSTEM_LIBS) -Wl,-rpath,'$$ORIGIN/..'
 
 clean:
 	rm -rf $(OUT)

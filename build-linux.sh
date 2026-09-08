@@ -8,6 +8,7 @@ BUILD_DIR="$ROOT_DIR/build"
 WORK_DIR="$BUILD_DIR/linux-work"
 OUT_DIR="$BUILD_DIR/linux-out"
 UPDATE=1
+KEEP_REVISIONS=0
 RUN_TESTS=1
 BACKEND=auto
 
@@ -18,6 +19,7 @@ Usage: ./build-linux.sh [options]
 Options:
   --backend NAME  auto (default), epoll, or uring.
   --offline       Do not fetch newer submodule revisions.
+  --no-sync       Use the already checked-out submodule revisions as-is.
   --no-test       Build only; skip smoke and Lua syntax tests.
   --jobs N        Parallel build jobs (defaults to CPU count).
   --help          Show this help.
@@ -37,6 +39,7 @@ while [ "$#" -gt 0 ]; do
 			BACKEND=$1
 			;;
 		--offline) UPDATE=0 ;;
+		--no-sync) KEEP_REVISIONS=1 ;;
 		--no-test) RUN_TESTS=0 ;;
 		--jobs)
 			shift
@@ -69,7 +72,9 @@ fi
 command -v gcc >/dev/null 2>&1 || { echo "Cannot find gcc." >&2; exit 1; }
 command -v make >/dev/null 2>&1 || { echo "Cannot find make." >&2; exit 1; }
 
-if [ "$UPDATE" -eq 1 ]; then
+if [ "$KEEP_REVISIONS" -eq 1 ]; then
+	:
+elif [ "$UPDATE" -eq 1 ]; then
 	"$ROOT_DIR/scripts/update-submodules.sh"
 else
 	git -C "$ROOT_DIR" submodule update --init --checkout -- \
@@ -94,7 +99,7 @@ git -C "$ROOT_DIR/third_party/luajit2" archive HEAD |
 (
 	cd "$WORK_DIR/skynet"
 	GIT_CEILING_DIRECTORIES="$WORK_DIR" \
-		git apply "$ROOT_DIR/patches/skynet-luajit.patch"
+		git apply --ignore-space-change "$ROOT_DIR/patches/skynet-luajit.patch"
 	grep -q 'require "skynetjit.compat"' lualib/loader.lua || {
 		echo "Skynet LuaJIT compatibility patch was not applied" >&2
 		exit 1
@@ -124,7 +129,8 @@ make -f "$ROOT_DIR/integration/linux.mk" -j"$JOBS" \
 	SKYNET_DIR="$WORK_DIR/skynet" LUAJIT_DIR="$WORK_DIR/luajit2" \
 	OUT="$OUT_DIR" INTEGRATION_DIR="$ROOT_DIR" SOCKET_BACKEND="$BACKEND" all
 
-cp -a "$WORK_DIR/luajit2/src/libluajit-5.1.so" "$OUT_DIR/"
+cp -a "$WORK_DIR/luajit2/src/libluajit.so" "$OUT_DIR/"
+ln -sf libluajit.so "$OUT_DIR/libluajit-5.1.so.2"
 cp "$WORK_DIR/luajit2/src/luajit" "$OUT_DIR/luajit"
 cp -a "$WORK_DIR/skynet/lualib" "$OUT_DIR/lualib"
 cp -a "$WORK_DIR/skynet/service" "$OUT_DIR/service"
@@ -169,10 +175,8 @@ if [ "$RUN_TESTS" -eq 1 ]; then
 		cd "$OUT_DIR"
 		./luajit "$ROOT_DIR/tests/smoke.lua"
 		export LUA_PATH="./lualib/?.lua"
-		find lualib service -type f -name '*.lua' ! -path 'lualib/jit/*' -print |
-		while IFS= read -r file; do
-			./luajit -b "$file" /dev/null
-		done
+		find lualib service -type f -name '*.lua' ! -path 'lualib/jit/*' \
+			-exec ./luajit -b '{}' /dev/null \;
 	)
 	echo "Running Skynet runtime smoke test ($BACKEND)..."
 	(
