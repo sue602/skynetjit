@@ -115,7 +115,8 @@ skynet.exe examples\config
 - Windows 构建将 WinSock `FD_SETSIZE` 统一设为 65535；Skynet socket 事件循环使用
   wepoll，且一键测试会同时创建并注册 8192 个 UDP socket 验证容量。
 - Linux 默认使用 epoll，也可通过 `--backend uring` 启用独立的 completion-driven
-  io_uring socket 后端；补丁和实现文件只会复制到 `build/linux-work`，不会修改子模块。
+  io_uring socket 后端。该后端为空闲 socket 的 recv/recvmsg 使用 `POLL_FIRST`，避免一次
+  无效的直接收包尝试；补丁和实现文件只会复制到 `build/linux-work`，不会修改子模块。
 - Win64 I/O 包装保持 POSIX 的零长度 read/recv 立即返回语义，使 `skynet.abort`
   能够处理无 payload 的退出控制命令并完成线程回收。
 - `compat/luajit` 提供 Skynet 当前 Lua 5.4 C API 到 LuaJIT 2.1 API 的适配。

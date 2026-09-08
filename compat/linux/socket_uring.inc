@@ -21,6 +21,7 @@ struct skynetjit_uring_op {
 	bool cancelled;
 	bool zero_copy;
 	bool zero_copy_wait_notify;
+	bool poll_first;
 	char *buffer;
 	void (*release_buffer)(void *);
 	void *release_arg;
@@ -55,6 +56,12 @@ static bool SKYNETJIT_URING_CTRL_PENDING = false;
 #define SKYNETJIT_URING_HAVE_SEND_ZC 0
 #endif
 
+#if defined(IORING_RECVSEND_POLL_FIRST)
+#define SKYNETJIT_URING_HAVE_RECV_POLL_FIRST 1
+#else
+#define SKYNETJIT_URING_HAVE_RECV_POLL_FIRST 0
+#endif
+
 #ifndef SKYNETJIT_URING_ZC_MIN_SIZE
 #define SKYNETJIT_URING_ZC_MIN_SIZE (64 * 1024)
 #endif
@@ -66,6 +73,10 @@ static bool SKYNETJIT_URING_MULTISHOT_ACCEPT_FALLBACK_ANNOUNCED = false;
 static bool SKYNETJIT_URING_SEND_ZC = SKYNETJIT_URING_HAVE_SEND_ZC != 0;
 static bool SKYNETJIT_URING_SEND_ZC_ANNOUNCED = false;
 static bool SKYNETJIT_URING_SEND_ZC_FALLBACK_ANNOUNCED = false;
+static bool SKYNETJIT_URING_RECV_POLL_FIRST =
+	SKYNETJIT_URING_HAVE_RECV_POLL_FIRST != 0;
+static bool SKYNETJIT_URING_RECV_POLL_FIRST_ANNOUNCED = false;
+static bool SKYNETJIT_URING_RECV_POLL_FIRST_FALLBACK_ANNOUNCED = false;
 
 static struct io_uring_sqe *
 skynetjit_uring_get_sqe(void) {
@@ -139,9 +150,21 @@ skynetjit_uring_submit_op(struct skynetjit_uring_op *op) {
 		break;
 	case SKYNETJIT_URING_RECV:
 		io_uring_prep_recv(sqe, op->fd, op->buffer, op->size, 0);
+		if (SKYNETJIT_URING_RECV_POLL_FIRST) {
+#if SKYNETJIT_URING_HAVE_RECV_POLL_FIRST
+			sqe->ioprio |= IORING_RECVSEND_POLL_FIRST;
+			op->poll_first = true;
+#endif
+		}
 		break;
 	case SKYNETJIT_URING_RECVMSG:
 		io_uring_prep_recvmsg(sqe, op->fd, &op->msg, 0);
+		if (SKYNETJIT_URING_RECV_POLL_FIRST) {
+#if SKYNETJIT_URING_HAVE_RECV_POLL_FIRST
+			sqe->ioprio |= IORING_RECVSEND_POLL_FIRST;
+			op->poll_first = true;
+#endif
+		}
 		break;
 	case SKYNETJIT_URING_SEND:
 		if (SKYNETJIT_URING_SEND_ZC &&
@@ -507,11 +530,36 @@ skynetjit_uring_forget_socket(struct socket *s) {
 	s->uring_low_head = s->uring_low_tail = NULL;
 }
 
+static void
+skynetjit_uring_disable_recv_poll_first(void) {
+	SKYNETJIT_URING_RECV_POLL_FIRST = false;
+	if (!SKYNETJIT_URING_RECV_POLL_FIRST_FALLBACK_ANNOUNCED) {
+		skynet_error(NULL,
+			"[skynetjit] io_uring recv poll-first unavailable; using direct recv");
+		SKYNETJIT_URING_RECV_POLL_FIRST_FALLBACK_ANNOUNCED = true;
+	}
+}
+
+static void
+skynetjit_uring_note_recv_poll_first(const struct skynetjit_uring_op *op, int res) {
+	if (res >= 0 && op->poll_first && !SKYNETJIT_URING_RECV_POLL_FIRST_ANNOUNCED) {
+		skynet_error(NULL, "[skynetjit] io_uring recv poll-first active");
+		SKYNETJIT_URING_RECV_POLL_FIRST_ANNOUNCED = true;
+	}
+}
+
 static int
 skynetjit_uring_finish_tcp_read(struct socket_server *ss, struct skynetjit_uring_op *op,
 	int res, struct socket_message *result) {
 	struct socket *s = op->s;
 	s->uring_read_pending = false;
+	if ((res == -EINVAL || res == -EOPNOTSUPP) && op->poll_first) {
+		skynetjit_uring_disable_recv_poll_first();
+		skynetjit_uring_free_op(op);
+		(void)skynetjit_uring_begin_read(ss, s);
+		return -1;
+	}
+	skynetjit_uring_note_recv_poll_first(op, res);
 	if (res < 0) {
 		skynetjit_uring_free_op(op);
 		if (res == -EINTR || res == -EAGAIN || res == -ECANCELED) {
@@ -572,6 +620,13 @@ skynetjit_uring_finish_udp_read(struct socket_server *ss, struct skynetjit_uring
 	int res, struct socket_message *result) {
 	struct socket *s = op->s;
 	s->uring_read_pending = false;
+	if ((res == -EINVAL || res == -EOPNOTSUPP) && op->poll_first) {
+		skynetjit_uring_disable_recv_poll_first();
+		skynetjit_uring_free_op(op);
+		(void)skynetjit_uring_begin_read(ss, s);
+		return -1;
+	}
+	skynetjit_uring_note_recv_poll_first(op, res);
 	if (res < 0) {
 		skynetjit_uring_free_op(op);
 		if (res == -EINTR || res == -EAGAIN || res == -ECANCELED) {
