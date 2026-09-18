@@ -40,6 +40,14 @@ SKYNET_BIN := $(OUT)/skynet
 
 include $(INTEGRATION_DIR)/integration/sources.mk
 
+NB_CURL_CFLAGS :=
+NB_CURL_LIBS := -lcurl
+NB_ZLIB_CFLAGS :=
+NB_ZLIB_LIBS := -lz
+NB_SKYNET_DEP := $(SKYNET_SO)
+NB_RPATH := -Wl,-rpath,'$$ORIGIN/..'
+include $(INTEGRATION_DIR)/integration/netbull.mk
+
 .PHONY: all core modules tools clean print-config
 
 all: core modules tools

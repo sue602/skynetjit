@@ -43,6 +43,17 @@ SKYNET_EXE := $(OUT)/skynet.exe
 
 include $(INTEGRATION_DIR)/integration/sources.mk
 
+DEPS_DIR ?= $(INTEGRATION_DIR)/build/deps
+NB_CURL_CFLAGS := -DCURL_STATICLIB -I$(DEPS_DIR)/curl-static/include
+NB_CURL_LIBS := $(DEPS_DIR)/curl-static/lib/libcurl.a \
+	$(DEPS_DIR)/zlib-static/lib/libz.a \
+	-lcrypt32 -lbcrypt -ladvapi32 -lsecur32 -lnetapi32 -lversion -lwinmm -lwldap32 -liphlpapi
+NB_ZLIB_CFLAGS := -I$(DEPS_DIR)/zlib-static/include
+NB_ZLIB_LIBS := $(DEPS_DIR)/zlib-static/lib/libz.a
+NB_SKYNET_DEP := $(SKYNET_DLL)
+NB_RPATH :=
+include $(INTEGRATION_DIR)/integration/netbull.mk
+
 .PHONY: all core modules tools clean print-config
 
 all: core modules tools

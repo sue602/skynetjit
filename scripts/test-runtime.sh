@@ -65,6 +65,12 @@ rm -f runtime-smoke.ok
 run_skynet_exit_test "$TEST_DIR/runtime-config.lua" runtime-smoke.log
 test -f runtime-smoke.ok
 grep -q "runtime-smoke: Skynet socket loop succeeded" runtime-smoke.log
+
+echo "Running NetBull luaclib smoke test..."
+rm -f clibs-smoke.ok
+run_skynet_exit_test "$TEST_DIR/clibs-config.lua" clibs-smoke.log
+test -f clibs-smoke.ok
+grep -q "clibs-smoke: NetBull luaclib modules succeeded" clibs-smoke.log
 if [ "$BACKEND" = uring ]; then
 	grep -q "io_uring completion backend enabled" runtime-smoke.log
 	echo "Running completion-driven io_uring TCP and UDP round-trip tests..."

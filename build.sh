@@ -66,6 +66,10 @@ fi
 
 prepare_sources
 
+echo "Preparing Windows luaclib dependencies (zlib, libcurl)..."
+bash "$ROOT_DIR/scripts/fetch-deps.sh" "$ROOT_DIR" "$ROOT_DIR/build/deps" \
+	"$MINGW_ROOT" "$SYNC_MODE" "$JOBS"
+
 echo "Building LuaJIT2 for x64..."
 make -C "$WORK_DIR/luajit2" -j"$JOBS" \
 	CC="$CC" HOST_CC="$CC" \

@@ -127,11 +127,24 @@ skynet.exe examples\config
 - `compat/luajit/sharetable_bridge.c` 只负责进程内的 lightuserdata 和无 upvalue
   C function 转换；LuaJIT fast function 使用全局表或已加载模块中的符号引用重建。
 - `patches/skynet-luajit.patch` 只应用到 `build/work`，不会污染子模块。
+- `luaclib-src/` 收录原 NetBull 的 7 个 Lua C 库（cjson、luacurl、lfs、pb、
+  sqlite3、zlib、zset/skiplist）源码，作为本仓库的 vendored 目录参与双平台构建，
+  产物为 `luaclib/*.so`；`zset.lua` 与 `protoc.lua` 会叠加到输出的 `lualib/`。
+  这些库不修改任何子模块。
+- Windows 构建会先由 `scripts/fetch-deps.sh` 把 zlib 与 libcurl 源码下载到
+  `build/deps` 缓存，并用便携版 CMake 静态编译（libcurl 启用 Schannel HTTPS 与
+  zlib），随后整体链接进 `luacurl.so` 和 `zlib.so`，输出目录不需要额外 DLL。
+  `--offline` 时若缓存不存在会直接报错提示先联网构建一次。
+- Linux 构建的 `luacurl.so`/`zlib.so` 直接链接系统 libcurl 与 zlib，需要
+  `libcurl4-openssl-dev` 和 `zlib1g-dev`；`build-linux.sh` 会提前检查并给出提示。
 - 构建使用 `NOUSE_JEMALLOC`，所以不需要初始化 Skynet 的 jemalloc 子模块。
 
 一键测试会验证 LuaJIT 环境、核心 Lua C 模块、所有 Lua 文件语法，并真正启动
 Skynet，验证 sharetable 的循环图、重复引用、函数、lightuserdata、只读保护和热更新，
-再完成监听 socket 与 `skynet.abort` 正常退出。Windows 额外验证 console stdin 命令和
+再完成监听 socket 与 `skynet.abort` 正常退出。另有一项 NetBull luaclib 冒烟测试，
+在 Skynet 服务内验证 cjson JSON 往返、lfs 目录属性、zlib 压缩往返（走
+`skynet_malloc`）、内存 SQLite 增删查、zset 有序集合排名、luacurl 句柄与选项、以及
+protoc+pb 的 protobuf 编码解码往返。Windows 额外验证 console stdin 命令和
 wepoll 65535-socket 容量；Linux 运行同一套运行时与退出测试。选择 `uring` 时还会验证
 TCP 和 UDP 回环往返，覆盖 accept/connect/recv/send/recvmsg/sendmsg 的完成事件路径，
 并验证 8192 个 UDP socket 的并发注册。Linux 如需把容量回归提高到 65535，可设置

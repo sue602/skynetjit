@@ -93,6 +93,7 @@ prepare_sources() {
 		grep -q 'require "skynetjit.compat"' lualib/loader.lua
 	)
 	cp -a "$ROOT_DIR/compat/lua/." "$WORK_DIR/skynet/lualib/"
+	cp -a "$ROOT_DIR/luaclib-src/lua/." "$WORK_DIR/skynet/lualib/"
 	if [ "$SOCKET_BACKEND" = uring ]; then
 		cp "$ROOT_DIR/compat/linux/socket_uring.h" "$WORK_DIR/skynet/skynet-src/"
 		cp "$ROOT_DIR/compat/linux/socket_uring.inc" "$WORK_DIR/skynet/skynet-src/"
