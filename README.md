@@ -1,10 +1,13 @@
 # skynetjit
 
-在 Windows x64 上将 [dpull/skynet-mingw](https://github.com/dpull/skynet-mingw)
-的 Windows 适配层与 [OpenResty LuaJIT2](https://github.com/openresty/luajit2)
-组合起来构建 Skynet。
+在 Windows x64 与 Linux 上构建带 LuaJIT 的 Skynet。上游
+[cloudwu/skynet](https://github.com/cloudwu/skynet) 通过
+[dpull/skynet-mingw](https://github.com/dpull/skynet-mingw) 的嵌套子模块引入
+（skynet-mingw 目前只作为子模块宿主，构建不使用它自带的代码），LuaJIT 使用
+[OpenResty LuaJIT2](https://github.com/openresty/luajit2)。Windows 适配由本项目的
+`compat/win64` 与上游 Skynet 自带的 `3rd/compat-mingw`（wepoll、dlfcn）提供。
 
-两个上游项目都以 Git 子模块保存，本项目不会直接修改它们的工作树。构建时会用
+这些上游项目都以 Git 子模块保存，本项目不会直接修改它们的工作树。构建时会用
 `git archive` 生成一次性工作副本，再向工作副本应用兼容补丁，产物位于
 `build/out`。
 

@@ -1,12 +1,5 @@
 local skynet = require "skynet"
 
-local steps
-
-local function step(name)
-	steps:write(name, "\n")
-	steps:flush()
-end
-
 local function test_cjson()
 	local cjson = require "cjson"
 	local decoded = cjson.decode(cjson.encode({
@@ -105,23 +98,12 @@ local tests = {
 }
 
 local function run()
-	steps = assert(io.open("clibs-steps.txt", "wb"))
-	local selection
-	local argstr = skynet.getenv("clibs_select")
-	if argstr and argstr ~= "" then
-		selection = {}
-		for name in argstr:gmatch("[^,]+") do
-			selection[name] = true
-		end
-	end
 	for _, item in ipairs(tests) do
-		if selection == nil or selection[item[1]] then
-			step("start " .. item[1])
-			item[2]()
-			step("done " .. item[1])
+		local ok, message = pcall(item[2])
+		if not ok then
+			error(item[1] .. ": " .. tostring(message), 0)
 		end
 	end
-	steps:close()
 	local success_file = assert(io.open("clibs-smoke.ok", "wb"))
 	success_file:write("ok\n")
 	success_file:close()
