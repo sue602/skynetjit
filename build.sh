@@ -66,9 +66,11 @@ fi
 
 prepare_sources
 
-echo "Preparing Windows luaclib dependencies (zlib, libcurl)..."
-bash "$ROOT_DIR/scripts/fetch-deps.sh" "$ROOT_DIR" "$ROOT_DIR/build/deps" \
-	"$MINGW_ROOT" "$SYNC_MODE" "$JOBS"
+if [ "$NETBULL" = 1 ]; then
+	echo "Preparing Windows luaclib dependencies (zlib, libcurl)..."
+	bash "$ROOT_DIR/scripts/fetch-deps.sh" "$ROOT_DIR" "$ROOT_DIR/build/deps" \
+		"$MINGW_ROOT" "$SYNC_MODE" "$JOBS"
+fi
 
 echo "Building LuaJIT2 for x64..."
 make -C "$WORK_DIR/luajit2" -j"$JOBS" \
@@ -80,7 +82,7 @@ make -f "$ROOT_DIR/integration/Makefile" -j"$JOBS" \
 	CC="$CC" AR="$AR" RANLIB="$RANLIB" \
 	SKYNET_DIR="$WORK_DIR/skynet" \
 	LUAJIT_DIR="$WORK_DIR/luajit2" \
-	OUT="$OUT_DIR" INTEGRATION_DIR="$ROOT_DIR" all
+	OUT="$OUT_DIR" INTEGRATION_DIR="$ROOT_DIR" NETBULL="$NETBULL" all
 
 cp "$WORK_DIR/luajit2/src/lua51.dll" "$OUT_DIR/lua51.dll"
 cp "$WORK_DIR/luajit2/src/luajit.exe" "$OUT_DIR/luajit.exe"

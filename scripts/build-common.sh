@@ -5,6 +5,7 @@ parse_build_options() {
 	SYNC_MODE=update
 	RUN_TESTS=1
 	SOCKET_BACKEND=epoll
+	NETBULL=1
 	JOBS=${NUMBER_OF_PROCESSORS:-2}
 	if command -v nproc >/dev/null 2>&1; then
 		JOBS=$(nproc)
@@ -14,6 +15,8 @@ parse_build_options() {
 			--offline) SYNC_MODE=offline ;;
 			--no-sync) SYNC_MODE=current ;;
 			--no-test) RUN_TESTS=0 ;;
+			--no-netbull) NETBULL=0 ;;
+			--netbull) NETBULL=1 ;;
 			--backend)
 				shift
 				[ "$#" -gt 0 ] || { echo "--backend needs a value" >&2; exit 2; }
@@ -43,8 +46,11 @@ common_usage() {
 Options:
   --offline       Use recorded submodule revisions without fetching updates.
   --no-sync       Use the already checked-out revisions without changing them.
-	--no-test       Build only; skip smoke and Lua syntax tests.
-	--backend NAME  Linux socket backend: epoll (default) or uring.
+  --no-test       Build only; skip smoke and Lua syntax tests.
+  --backend NAME  Linux socket backend: epoll (default) or uring.
+  --no-netbull    Skip the vendored NetBull luaclib set (cjson, luacurl, lfs,
+                  pb, sqlite3, zlib, zset) and its dependency downloads.
+  --netbull       Build the NetBull luaclib set (default).
   --jobs N        Parallel build jobs (defaults to CPU count).
   --help          Show this help.
 USAGE
@@ -93,7 +99,9 @@ prepare_sources() {
 		grep -q 'require "skynetjit.compat"' lualib/loader.lua
 	)
 	cp -a "$ROOT_DIR/compat/lua/." "$WORK_DIR/skynet/lualib/"
-	cp -a "$ROOT_DIR/luaclib-src/lua/." "$WORK_DIR/skynet/lualib/"
+	if [ "$NETBULL" = 1 ]; then
+		cp -a "$ROOT_DIR/luaclib-src/lua/." "$WORK_DIR/skynet/lualib/"
+	fi
 	if [ "$SOCKET_BACKEND" = uring ]; then
 		cp "$ROOT_DIR/compat/linux/socket_uring.h" "$WORK_DIR/skynet/skynet-src/"
 		cp "$ROOT_DIR/compat/linux/socket_uring.inc" "$WORK_DIR/skynet/skynet-src/"

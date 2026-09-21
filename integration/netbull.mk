@@ -1,6 +1,10 @@
 # Vendored NetBull luaclib set. The including platform makefile must define
 # NB_CURL_CFLAGS, NB_CURL_LIBS, NB_ZLIB_CFLAGS, NB_ZLIB_LIBS, NB_SKYNET_DEP
 # and the shared BASE_CFLAGS/SHARED/LUA_LIBS/SYSTEM_LIBS machinery first.
+# Set NETBULL=0 to leave the set out of the build entirely.
+
+NETBULL ?= 1
+ifneq ($(NETBULL),0)
 
 NETBULL_SRC := $(INTEGRATION_DIR)/luaclib-src
 LUA_CLIB += cjson lfs pb sqlite3 luacurl zlib skiplist/c
@@ -39,3 +43,5 @@ $(LUA_CLIB_DIR)/skiplist/c.so: $(NETBULL_SRC)/zset/lua-skiplist.c \
 	$(NETBULL_SRC)/zset/skiplist.c | $(LUA_CLIB_DIR)/skiplist
 	$(CC) $(LUA51_CFLAGS) $(SHARED) -I$(NETBULL_SRC)/zset \
 		-o $@ $^ $(LUA_LIBS) $(SYSTEM_LIBS)
+
+endif

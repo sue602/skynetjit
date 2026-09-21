@@ -79,6 +79,9 @@ epoll。Windows 只支持 wepoll 后端。
   Windows 共享同一工作区时的本地验证；
 - `--no-test`：只编译，不执行测试；
 - `--backend epoll|uring`：仅 Linux 可选，默认为 `epoll`；`uring` 需要 `liburing-dev`；
+- `--no-netbull`：跳过 `luaclib-src/` 的 7 个 NetBull Lua C 库（cjson、luacurl、
+  lfs、pb、sqlite3、zlib、zset）及其 Lua 叠加文件；Windows 下同时不下载、不编译
+  zlib/libcurl/CMake 依赖，Linux 下跳过 libcurl/zlib 开发包检查。默认编译这些库；
 - `--jobs N`：设置并行编译任务数。
 
 也可以只更新源码：
@@ -133,7 +136,7 @@ skynet.exe examples\config
 - `luaclib-src/` 收录原 NetBull 的 7 个 Lua C 库（cjson、luacurl、lfs、pb、
   sqlite3、zlib、zset/skiplist）源码，作为本仓库的 vendored 目录参与双平台构建，
   产物为 `luaclib/*.so`；`zset.lua` 与 `protoc.lua` 会叠加到输出的 `lualib/`。
-  这些库不修改任何子模块。
+  这些库不修改任何子模块，可用 `--no-netbull` 整组关闭。
 - Windows 构建会先由 `scripts/fetch-deps.sh` 把 zlib 与 libcurl 源码下载到
   `build/deps` 缓存，并用便携版 CMake 静态编译（libcurl 启用 Schannel HTTPS 与
   zlib），随后整体链接进 `luacurl.so` 和 `zlib.so`，输出目录不需要额外 DLL。

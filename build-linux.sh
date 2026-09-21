@@ -30,16 +30,18 @@ case "$("$CC" -dumpmachine)" in
 	x86_64*linux*) ;;
 	*) echo "A native Linux x64 compiler is required." >&2; exit 1 ;;
 esac
-echo | "$CC" -E -xc -include curl/curl.h - >/dev/null 2>&1 || {
-	echo "The luaclib curl module needs the libcurl development package" >&2
-	echo "(Debian/Ubuntu: apt install libcurl4-openssl-dev)." >&2
-	exit 1
-}
-echo | "$CC" -E -xc -include zlib.h - >/dev/null 2>&1 || {
-	echo "The luaclib zlib module needs the zlib development package" >&2
-	echo "(Debian/Ubuntu: apt install zlib1g-dev)." >&2
-	exit 1
-}
+if [ "$NETBULL" = 1 ]; then
+	echo | "$CC" -E -xc -include curl/curl.h - >/dev/null 2>&1 || {
+		echo "The luaclib curl module needs the libcurl development package" >&2
+		echo "(Debian/Ubuntu: apt install libcurl4-openssl-dev)." >&2
+		exit 1
+	}
+	echo | "$CC" -E -xc -include zlib.h - >/dev/null 2>&1 || {
+		echo "The luaclib zlib module needs the zlib development package" >&2
+		echo "(Debian/Ubuntu: apt install zlib1g-dev)." >&2
+		exit 1
+	}
+fi
 prepare_sources
 
 echo "Building LuaJIT2 for Linux..."
@@ -50,7 +52,8 @@ make -C "$WORK_DIR/luajit2" -j"$JOBS" \
 echo "Building Skynet for Linux ($SOCKET_BACKEND)..."
 make -f "$ROOT_DIR/integration/linux.mk" -j"$JOBS" \
 	CC="$CC" SKYNET_DIR="$WORK_DIR/skynet" LUAJIT_DIR="$WORK_DIR/luajit2" \
-	OUT="$OUT_DIR" INTEGRATION_DIR="$ROOT_DIR" SOCKET_BACKEND="$SOCKET_BACKEND" all
+	OUT="$OUT_DIR" INTEGRATION_DIR="$ROOT_DIR" SOCKET_BACKEND="$SOCKET_BACKEND" \
+	NETBULL="$NETBULL" all
 
 cp -a "$WORK_DIR/luajit2/src/libluajit.so" "$OUT_DIR/"
 ln -sf libluajit.so "$OUT_DIR/libluajit-5.1.so.2"
