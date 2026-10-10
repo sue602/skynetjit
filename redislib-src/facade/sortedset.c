@@ -51,74 +51,8 @@ static const char *nanerr = "resulting score is not a number (NaN)";
 
 /* ---- argument helpers --------------------------------------------------- */
 
-/* getDoubleFromObject()'s parse (object.c:1141), non-raising: C_OK with the
- * value in *v, or C_ERR. A Lua number is already the double, but string2d()
- * refuses NaN, so a NaN number argument is refused the same way: that is also
- * exactly what Redis' own scripting path does, since it turns the number into
- * the string "-nan" before parsing.
- *
- * Only a real LUA_TSTRING is read through string2d(): lua_isstring() is true
- * for numbers as well, and lua_tolstring() would rewrite the stack slot with
- * LuaJIT's %.14g rendering and cost a double its precision. */
-static int
-rl_todouble(lua_State *L, int idx, double *v) {
-    if (lua_type(L, idx) == LUA_TNUMBER) {
-        *v = lua_tonumber(L, idx);
-        if (isnan(*v)) return C_ERR;
-        return C_OK;
-    }
-    if (lua_type(L, idx) == LUA_TSTRING) {
-        size_t len;
-        const char *s = lua_tostring(L, idx);
-
-        if (!string2d(s, len = lua_objlen(L, idx), v) || isnan(*v)) return C_ERR;
-        return C_OK;
-    }
-    return C_ERR;
-}
-
-/* getDoubleFromObjectOrReply(c,o,target,NULL) -- object.c:1156. */
-static double
-rl_checkdouble(lua_State *L, int idx) {
-    double v;
-
-    if (rl_todouble(L, idx, &v) != C_OK)
-        luaL_error(L, "value is not a valid float");
-    return v;
-}
-
-/* getLongLongFromObject()'s parse (object.c, non-raising like rl_todouble):
- * C_OK with the value in *out or C_ERR. */
-static int
-rl_tolong(lua_State *L, int idx, long long *out) {
-    if (lua_type(L, idx) == LUA_TNUMBER) {
-        double d = lua_tonumber(L, idx);
-        long long v;
-
-        if (!isfinite(d)) return C_ERR;
-        v = (long long)d;
-        if ((double)v != d) return C_ERR;   /* not an integer, or beyond the range */
-        *out = v;
-        return C_OK;
-    }
-    if (lua_type(L, idx) == LUA_TSTRING)
-        return string2ll(lua_tostring(L, idx), lua_objlen(L, idx), out) ?
-            C_OK : C_ERR;
-    return C_ERR;
-}
-
-/* getLongFromObjectOrReply() (object.c:1255), including its two error texts:
- * the shared one from getLongLongFromObjectOrReply() and the narrowing one. */
-static long
-rl_checklong(lua_State *L, int idx) {
-    long long v;
-
-    if (rl_tolong(L, idx, &v) != C_OK)
-        luaL_error(L, "value is not an integer or out of range");
-    if (v < LONG_MIN || v > LONG_MAX)
-        luaL_error(L, "value is out of range");
-    return (long)v;
-}
+/* The numeric argument helpers (rl_todouble / rl_checkdouble / rl_tolong /
+ * rl_checklong) are shared with the other facades: facade/rl_common.c. */
 
 /* One ZRANGEBYSCORE-style bound: "(5" is exclusive, and the number itself is
  * parsed by fast_float_strtod() with zslParseRange()'s rejections (kernel
@@ -158,21 +92,6 @@ rl_checkrangespec(lua_State *L, int imin, int imax, zrangespec *spec) {
         rl_rangebound(L, imax, &spec->max, &spec->maxex) == C_ERR)
         return C_ERR;
     return C_OK;
-}
-
-/* A member as the kernel wants it: an sds. zsetAdd()/zsetDel()/zsetScore()
- * copy what they keep (the skiplist owns its own strings), so the facade owns
- * this one and frees it. */
-static sds
-rl_member(lua_State *L, int idx) {
-    size_t len;
-    const char *s;
-
-    if (!lua_isstring(L, idx))
-        luaL_error(L, "string or number expected, got %s",
-                   lua_typename(L, lua_type(L, idx)));
-    s = lua_tolstring(L, idx, &len);
-    return sdsnewlen(s, len);
 }
 
 /* The zset payload of the object at idx. */
@@ -240,29 +159,38 @@ lzadd_generic(lua_State *L, int flags) {
     lt   = (flags & ZADD_IN_LT) != 0;
 
     elements = lua_gettop(L) - scoreidx + 1;
-    if (elements % 2 || !elements) return luaL_error(L, "syntax error");
+    if (elements % 2 || !elements) return rl_error(L, "-ERR syntax error");
     elements /= 2;
 
     if (nx && xx)
-        return luaL_error(L,
+        return rl_error(L,
             "XX and NX options at the same time are not compatible");
     if ((gt && nx) || (lt && nx) || (gt && lt))
-        return luaL_error(L,
+        return rl_error(L,
             "GT, LT, and/or NX options at the same time are not compatible");
     if (incr && elements > 1)
-        return luaL_error(L,
+        return rl_error(L,
             "INCR option supports a single increment-element pair");
 
     /* Start parsing all the scores, we need to emit any syntax error
      * before executing additions to the sorted set, as the command should
-     * either execute fully or nothing at all. */
-    scores = zmalloc(sizeof(double)*elements);
+     * either execute fully or nothing at all.
+     *
+     * rl: the element types are validated in the same pre-pass. Redis' ZADD
+     * cannot fail there -- a RESP argument is always a string -- so upstream
+     * allocates its score vector before the loop, and this facade may not: the
+     * only failure left in the add loop would then leave the vector behind. */
     for (j = 0; j < elements; j++) {
-        if (rl_todouble(L, scoreidx+j*2, &scores[j]) != C_OK) {
-            zfree(scores);
-            return luaL_error(L, "value is not a valid float");
-        }
+        double v;
+
+        if (rl_todouble(L, scoreidx+j*2, &v) != C_OK)
+            return rl_error(L, "value is not a valid float");
+        rl_checkmember(L, scoreidx+1+j*2);
     }
+
+    scores = zmalloc(sizeof(double)*elements);
+    for (j = 0; j < elements; j++)
+        rl_todouble(L, scoreidx+j*2, &scores[j]);
 
     /* rl: the key always exists here, so Redis's "no key + XX option: nothing
      * to do" short circuit has no input that can reach it; adding to an empty
@@ -281,7 +209,7 @@ lzadd_generic(lua_State *L, int flags) {
         if (retval == 0) {
             /* rl: like upstream the elements already added stay added. */
             zfree(scores);
-            luaL_error(L, "%s", nanerr);
+            rl_error(L, "%s", nanerr);
         }
         if (retflags & ZADD_OUT_ADDED) added++;
         if (retflags & ZADD_OUT_UPDATED) updated++;
@@ -446,7 +374,7 @@ lzremrange_generic(lua_State *L, rl_range_type rangetype) {
         end   = rl_checklong(L, 3);
     } else if (rangetype == RL_ZRANGE_SCORE) {
         if (rl_checkrangespec(L, 2, 3, &range) != C_OK)
-            return luaL_error(L, "min or max is not a float");
+            return rl_error(L, "min or max is not a float");
     } else {
         sds min = rl_member(L, 2), max = rl_member(L, 3);
         robj vmin, vmax;
@@ -459,7 +387,7 @@ lzremrange_generic(lua_State *L, rl_range_type rangetype) {
         rc = zslParseLexRange(&vmin, &vmax, &lexrange);
         sdsfree(min); sdsfree(max);
         if (rc != C_OK)
-            return luaL_error(L, "min or max not valid string range item");
+            return rl_error(L, "min or max not valid string range item");
     }
 
     /* Step 2: range sanity checks for the rank form. */
@@ -607,15 +535,6 @@ rl_zrange_emit_lp(lua_State *L, rl_zrange_out *out, unsigned char *eptr,
     out->count++;
 }
 
-/* Replace the zset a live facade object holds, releasing the previous payload.
- * Deliberately not rl_free_ud(): that one also marks the userdata dead, and
- * here the object stays in use. */
-static void
-rl_zset_replace(rl_object *dst, robj *fresh) {
-    rl_free_zset(dst->zobj);
-    dst->zobj = fresh;
-}
-
 static void
 rl_zrange_finalize(rl_zrange_out *out) {
     if (out->store) {
@@ -629,7 +548,7 @@ rl_zrange_finalize(rl_zrange_out *out) {
             rl_free_zset(fresh);
             fresh = zsetTypeCreate(0, 0);
         }
-        rl_zset_replace((rl_object*)lua_touserdata(out->L, 1), fresh);
+        rl_object_set_zset((rl_object*)lua_touserdata(out->L, 1), fresh);
         rl_pushint(out->L, (long long)out->count);
         return;
     }
@@ -855,7 +774,7 @@ rl_zrange_generic(lua_State *L, int store, rl_range_type rangetype,
     /* Step 1: skip <src> <min> <max> and parse the remaining options. */
     for (j = keyidx + 3; j <= lua_gettop(L); j++) {
         long leftargs = lua_gettop(L) - j;
-        if (lua_type(L, j) != LUA_TSTRING) return luaL_error(L, "syntax error");
+        if (lua_type(L, j) != LUA_TSTRING) return rl_error(L, "-ERR syntax error");
         const char *opt = lua_tostring(L, j);
 
         if (!store && !strcasecmp(opt, "withscores")) {
@@ -871,7 +790,7 @@ rl_zrange_generic(lua_State *L, int store, rl_range_type rangetype,
         } else if (rangetype == RL_ZRANGE_AUTO && !strcasecmp(opt, "byscore")) {
             rangetype = RL_ZRANGE_SCORE;
         } else {
-            return luaL_error(L, "syntax error");
+            return rl_error(L, "-ERR syntax error");
         }
     }
 
@@ -881,10 +800,10 @@ rl_zrange_generic(lua_State *L, int store, rl_range_type rangetype,
 
     /* Check for conflicting arguments. */
     if (opt_limit != -1 && rangetype == RL_ZRANGE_RANK)
-        return luaL_error(L,
+        return rl_error(L,
             "syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX");
     if (opt_withscores && rangetype == RL_ZRANGE_LEX)
-        return luaL_error(L,
+        return rl_error(L,
             "syntax error, WITHSCORES not supported in combination with BYLEX");
 
     if (direction == RL_RANGE_REVERSE &&
@@ -899,7 +818,7 @@ rl_zrange_generic(lua_State *L, int store, rl_range_type rangetype,
         opt_end   = rl_checklong(L, maxidx);
     } else if (rangetype == RL_ZRANGE_SCORE) {
         if (rl_checkrangespec(L, minidx, maxidx, &range) != C_OK)
-            return luaL_error(L, "min or max is not a float");
+            return rl_error(L, "min or max is not a float");
     } else {
         robj vmin, vmax;
 
@@ -911,7 +830,7 @@ rl_zrange_generic(lua_State *L, int store, rl_range_type rangetype,
         sdsfree(lexmin); sdsfree(lexmax);
         lexmin = lexmax = NULL;
         if (rc != C_OK)
-            return luaL_error(L, "min or max not valid string range item");
+            return rl_error(L, "min or max not valid string range item");
     }
 
     out.withscores = opt_withscores || store;
@@ -1031,10 +950,10 @@ lrank_generic(lua_State *L, int reverse, const char *cmdname) {
     int top = lua_gettop(L);
 
     if (top > 3)
-        return luaL_error(L, "wrong number of arguments for '%s' command", cmdname);
+        return rl_error(L, "wrong number of arguments for '%s' command", cmdname);
     if (top == 3) {
         if (!strcasecmp(luaL_checkstring(L, 3), "withscore")) opt_withscore = 1;
-        else return luaL_error(L, "syntax error");
+        else return rl_error(L, "-ERR syntax error");
     }
 
     ele = rl_member(L, 2);
@@ -1074,7 +993,7 @@ lzcount(lua_State *L) {
     unsigned long count = 0;
 
     if (rl_checkrangespec(L, 2, 3, &range) != C_OK)
-        return luaL_error(L, "min or max is not a float");
+        return rl_error(L, "min or max is not a float");
 
     if (zobj->encoding == OBJ_ENCODING_LISTPACK) {
         unsigned char *zl = zobj->ptr;
@@ -1120,7 +1039,7 @@ lzlexcount(lua_State *L) {
     vmax.type = OBJ_STRING; vmax.encoding = OBJ_ENCODING_RAW; vmax.ptr = max;
     if (zslParseLexRange(&vmin, &vmax, &range) != C_OK) {
         sdsfree(min); sdsfree(max);
-        return luaL_error(L, "min or max not valid string range item");
+        return rl_error(L, "min or max not valid string range item");
     }
     sdsfree(min); sdsfree(max);
 
@@ -1242,11 +1161,11 @@ lzpop_generic(lua_State *L, int where) {
     long j;
 
     int top = lua_gettop(L);
-    if (top > 2) return luaL_error(L, "syntax error");
+    if (top > 2) return rl_error(L, "-ERR syntax error");
     if (top == 2) {
         long long v;
         if (rl_tolong(L, 2, &v) != C_OK || v < 0)
-            return luaL_error(L, "value is out of range, must be positive");
+            return rl_error(L, "value is out of range, must be positive");
         count = (long)v;
     }
     if (count == -1) count = 1;
@@ -1287,24 +1206,24 @@ lzmpop(lua_State *L) {
 
     luaL_checktype(L, 1, LUA_TTABLE);
     kn = (unsigned int)lua_objlen(L, 1);
-    if (kn == 0) return luaL_error(L, "numkeys should be greater than 0");
+    if (kn == 0) return rl_error(L, "numkeys should be greater than 0");
 
-    if (lua_type(L, 2) != LUA_TSTRING) return luaL_error(L, "syntax error");
+    if (lua_type(L, 2) != LUA_TSTRING) return rl_error(L, "-ERR syntax error");
     if (!strcasecmp(lua_tostring(L, 2), "min")) where = RL_ZSET_MIN;
     else if (!strcasecmp(lua_tostring(L, 2), "max")) where = RL_ZSET_MAX;
-    else return luaL_error(L, "syntax error");
+    else return rl_error(L, "-ERR syntax error");
 
     if (lua_gettop(L) == 4) {
         long long v;
 
         if (lua_type(L, 3) != LUA_TSTRING ||
             strcasecmp(lua_tostring(L, 3), "count"))
-            return luaL_error(L, "syntax error");
+            return rl_error(L, "-ERR syntax error");
         if (rl_tolong(L, 4, &v) != C_OK || v < 1)
-            return luaL_error(L, "count should be greater than 0");
+            return rl_error(L, "count should be greater than 0");
         count = (long)v;
     } else if (lua_gettop(L) != 2) {
-        return luaL_error(L, "syntax error");
+        return rl_error(L, "-ERR syntax error");
     }
     if (count == -1) count = 1;
 
@@ -1476,17 +1395,17 @@ lzrandmember(lua_State *L) {
     if (top == 3) {
         if (lua_type(L, 3) != LUA_TSTRING ||
             strcasecmp(lua_tostring(L, 3), "withscores"))
-            return luaL_error(L, "syntax error");
+            return rl_error(L, "-ERR syntax error");
         withscores = 1;
     } else if (top > 3) {
-        return luaL_error(L, "syntax error");
+        return rl_error(L, "-ERR syntax error");
     }
 
     if (l >= 0) count = (unsigned long)l;
     else { count = (unsigned long)(-l); uniq = 0; }
 
     if (withscores && (l < -LONG_MAX/2 || l > LONG_MAX/2))
-        return luaL_error(L, "value is out of range");
+        return rl_error(L, "value is out of range");
 
     /* If count is zero, serve it ASAP to avoid special cases later. */
     if (count == 0) { lua_createtable(L, 0, 0); return 1; }
@@ -1675,12 +1594,12 @@ rl_setop_generic(lua_State *L, int keyidx, int op, int cardinality_only,
     luaL_checktype(L, keyidx, LUA_TTABLE);
     setnum = (long)lua_objlen(L, keyidx);
     if (setnum < 1)
-        return luaL_error(L,
+        return rl_error(L,
             "at least 1 input key is needed for '%s' command", cmdname);
 
     src = ztrycalloc(sizeof(zsetopsrc)*setnum);
     if (src == NULL)
-        return luaL_error(L,
+        return rl_error(L,
             "Insufficient memory, failed allocating transient memory, too many args.");
 
     /* read keys to be used for input */
@@ -1705,7 +1624,7 @@ rl_setop_generic(lua_State *L, int keyidx, int op, int cardinality_only,
 
         if (lua_type(L, j) != LUA_TSTRING) {
             zfree(src);
-            return luaL_error(L, "syntax error");
+            return rl_error(L, "-ERR syntax error");
         }
         opt = lua_tostring(L, j);
 
@@ -1717,7 +1636,7 @@ rl_setop_generic(lua_State *L, int keyidx, int op, int cardinality_only,
             if (lua_type(L, j) != LUA_TTABLE ||
                 (long)lua_objlen(L, j) != setnum) {
                 zfree(src);
-                return luaL_error(L, "syntax error");
+                return rl_error(L, "-ERR syntax error");
             }
             for (k = 0; k < setnum; k++) {
                 double w;
@@ -1728,7 +1647,7 @@ rl_setop_generic(lua_State *L, int keyidx, int op, int cardinality_only,
                 lua_pop(L, 1);
                 if (rc != C_OK) {
                     zfree(src);
-                    return luaL_error(L, "weight value is not a float");
+                    return rl_error(L, "weight value is not a float");
                 }
                 src[k].weight = w;
             }
@@ -1738,7 +1657,7 @@ rl_setop_generic(lua_State *L, int keyidx, int op, int cardinality_only,
             j++;
             if (lua_type(L, j) != LUA_TSTRING) {
                 zfree(src);
-                return luaL_error(L, "syntax error");
+                return rl_error(L, "-ERR syntax error");
             }
             if      (!strcasecmp(lua_tostring(L, j), "sum"))   aggregate = REDIS_AGGR_SUM;
             else if (!strcasecmp(lua_tostring(L, j), "min"))   aggregate = REDIS_AGGR_MIN;
@@ -1746,7 +1665,7 @@ rl_setop_generic(lua_State *L, int keyidx, int op, int cardinality_only,
             else if (!strcasecmp(lua_tostring(L, j), "count")) aggregate = REDIS_AGGR_COUNT;
             else {
                 zfree(src);
-                return luaL_error(L, "syntax error");
+                return rl_error(L, "-ERR syntax error");
             }
             j++;
         } else if (remaining >= 1 && !dst && !cardinality_only &&
@@ -1760,13 +1679,13 @@ rl_setop_generic(lua_State *L, int keyidx, int op, int cardinality_only,
             j++;
             if (rl_tolong(L, j, &v) != C_OK || v < 0) {
                 zfree(src);
-                return luaL_error(L, "LIMIT can't be negative");
+                return rl_error(L, "LIMIT can't be negative");
             }
             limit = (long)v;
             j++;
         } else {
             zfree(src);
-            return luaL_error(L, "syntax error");
+            return rl_error(L, "-ERR syntax error");
         }
     }
 
@@ -1952,13 +1871,13 @@ rl_setop_generic(lua_State *L, int keyidx, int op, int cardinality_only,
             /* zrangeResultFinalizeStore()/setKey() equivalent: the destination
              * ends up holding exactly the computed value. */
             zsetConvertToListpackIfNeeded(dstobj, maxelelen, totelelen);
-            rl_zset_replace(dst, dstobj);
+            rl_object_set_zset(dst, dstobj);
             rl_pushint(L, (long long)zsetLength(dstobj));
         } else {
             /* Redis replies 0 and deletes the destination key; an empty handle
              * is that, for a value that stays addressable. */
             rl_free_zset(dstobj);
-            rl_zset_replace(dst, zsetTypeCreate(0, 0));
+            rl_object_set_zset(dst, zsetTypeCreate(0, 0));
             rl_pushint(L, 0);
         }
         return 1;

@@ -7,3 +7,10 @@ Makefile text eol=lf
 *.inc text eol=lf
 *.patch text eol=lf
 *.patch whitespace=-blank-at-eol,-space-before-tab
+
+# redislib is verified by byte-comparing files against the pristine Redis
+# 8.10.0 tree, which is LF: keep it LF on every checkout, not only on the one
+# this port was written on (see redislib-src/NOTICE section 5).
+redislib-src/** text eol=lf
+tests/redislib_smoke.lua text eol=lf
+tests/redislib-config.lua text eol=lf

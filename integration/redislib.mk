@@ -53,9 +53,12 @@ $(RL_OBJ_DIR)/%.o: $(RL_KERNEL)/%.c | $(OBJ_DIR)
 	mkdir -p $(dir $@)
 	$(CC) $(RL_CFLAGS) -Wno-pointer-to-int-cast -Wno-unused-variable -c $< -o $@
 
-# rl_common.c is the shared facade object (lua headers come from RL_CFLAGS via
-# BASE_CFLAGS); give it its own rule so it does not fall into the kernel one.
-$(RL_OBJ_DIR)/rl_common.o: $(RL_FACADE)/rl_common.c | $(OBJ_DIR)
+# Facade objects that are not a module entry point -- rl_common.c (the shared
+# object model, linked into every module) and geo_sem.c (the geoset semantics
+# layer, linked into geo.so only). They take the Lua headers, so they need a
+# rule of their own rather than the kernel one; the two pattern rules coexist
+# because make picks whichever prerequisite actually exists.
+$(RL_OBJ_DIR)/%.o: $(RL_FACADE)/%.c | $(OBJ_DIR)
 	mkdir -p $(dir $@)
 	$(CC) $(RL_CFLAGS) -I$(RL_KERNEL) -I$(RL_FACADE) -c $< -o $@
 
@@ -65,17 +68,19 @@ $(RL_OBJ_DIR)/rl_common.o: $(RL_FACADE)/rl_common.c | $(OBJ_DIR)
 $(LUA_CLIB_DIR)/redis:
 	mkdir -p $@
 
+# A module that needs more than rl_common.o lists the extra objects in
+# RL_MODULE_OBJS, resolved per target by GNU make (geo.so takes geo_sem.o).
+$(LUA_CLIB_DIR)/redis/geo.so: $(RL_OBJ_DIR)/geo_sem.o
+$(LUA_CLIB_DIR)/redis/geo.so: RL_MODULE_OBJS := $(RL_OBJ_DIR)/geo_sem.o
+
 $(LUA_CLIB_DIR)/redis/%.so: $(RL_FACADE)/%.c $(RL_OBJ_DIR)/rl_common.o $(RL_KOBJS) \
 	| $(LUA_CLIB_DIR) $(LUA_CLIB_DIR)/redis $(NB_SKYNET_DEP)
 	$(CC) $(RL_CFLAGS) $(SHARED) -I$(RL_KERNEL) -I$(RL_FACADE) -o $@ $< \
-		$(RL_OBJ_DIR)/rl_common.o $(RL_KOBJS) \
+		$(RL_OBJ_DIR)/rl_common.o $(RL_MODULE_OBJS) $(RL_KOBJS) \
 		$(SKYNET_LINK) $(LUA_LIBS) $(SYSTEM_LIBS) $(NB_RPATH)
 
 # LUA_CLIB entries are appended by the facade tasks themselves, one per module
 # as it becomes available:
-LUA_CLIB += redis/bitmap redis/hll redis/sortedset
-#   LUA_CLIB += redis/hll        (Task 3)
-#   LUA_CLIB += redis/sortedset  (Task 4)
-#   LUA_CLIB += redis/geo        (Task 5)
+LUA_CLIB += redis/bitmap redis/hll redis/sortedset redis/geo
 
 endif

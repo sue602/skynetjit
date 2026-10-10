@@ -43,20 +43,78 @@ typedef struct rl_object {
     lua_State *L;   /* owning state, for __gc and for error messages */
 } rl_object;
 
+/* Raise the error reply Redis would have sent for this failure, as the text a
+ * client actually sees (spec §3.2).
+ *
+ * addReplyErrorLength() (networking.c:657) is the whole rule: a message that
+ * already starts with '-' carries its own error code ("-WRONGTYPE ...",
+ * "-INVALIDOBJ ...") and is sent as it is, minus that marker; every other
+ * message gets the generic code, so the client reads "ERR syntax error",
+ * "ERR need numeric radius". Upstream's literals are kept verbatim in the
+ * command files, including the leading '-', so this one function reproduces the
+ * wire text for every command instead of each call site guessing.
+ *
+ * The raised message still gets LuaJIT's usual "file:line: " prefix, like any
+ * other Lua error. Never returns. */
+#if defined(__GNUC__)
+__attribute__((format(printf, 2, 3)))
+#endif
+int rl_error(lua_State *L, const char *fmt, ...);
+
 /* Argument check for the method tables: returns the rl_object at index idx or
  * raises a lua_error whose text is the same one Redis replies with (spec §2.4).
  * A kind mismatch is the "WRONGTYPE ..." case. */
 rl_object *rl_check(lua_State *L, int idx, rl_kind kind);
 
+/* ---- numeric arguments, shared by every facade --------------------------
+ *
+ * These mirror object.c's getDoubleFromObjectOrReply() /
+ * getLong*FromObjectOrReply() pair, including which text each failure uses, so
+ * a command can tell "not a number" from "out of range" the way Redis does.
+ *
+ * The _to forms do not raise (C_OK with the value, C_ERR otherwise) because
+ * some commands must keep parsing -- GEOADD checks the decoded pair after the
+ * numbers are read. The _check forms raise with the Redis text.
+ *
+ * Only a real LUA_TSTRING is handed to the kernel's parsers: lua_isstring() is
+ * also true for numbers, and lua_tolstring() would rewrite the stack slot with
+ * LuaJIT's %.14g rendering and cost a double its precision. string2d() refuses
+ * NaN, so a NaN number argument is refused the same way -- which is also what
+ * Redis' own scripting path does, since it turns the number into the string
+ * "-nan" before parsing. */
+int rl_todouble(lua_State *L, int idx, double *v);
+int rl_tolong(lua_State *L, int idx, long long *v);
+double rl_checkdouble(lua_State *L, int idx);   /* "value is not a valid float" */
+long rl_checklong(lua_State *L, int idx);        /* object.c:1241-1267 texts    */
+
 /* __gc entry: releases whatever the kind owns (sdsfree for str, the skiplist +
  * dict or listpack for zobj) through the same allocator the kernel used. */
 void rl_free_ud(lua_State *L, void *p);
+
+/* A member / lex-bound argument as the kernel wants it: a fresh sds the caller
+ * frees. Numbers are accepted through Lua's own tostring, which is the string a
+ * client would send for that value. */
+sds rl_member(lua_State *L, int idx);
+
+/* The same type check, without allocating: a command that must validate every
+ * argument before it changes anything (ZADD / GEOADD's "fully or nothing at
+ * all") checks the element types with this, and only then builds the vector it
+ * cannot build without -- because this raise, unlike the ones above, happens
+ * after memory has been taken. */
+void rl_checkmember(lua_State *L, int idx);
 
 /* Release one kernel zset object -- object.c's freeSortedSet() for the two
  * encodings a redislib zset ever reaches. rl_free_ud() calls it for the
  * RL_ZSET / RL_GEO arm, and a facade that swaps the payload of a live object
  * (ZRANGESTORE) calls it directly, without going through the __gc marking. */
 void rl_free_zset(robj *zobj);
+
+/* Make `fresh` the zset that `dst` holds, releasing the previous one. The store
+ * commands (ZRANGESTORE, ZUNION/INTER/DIFFSTORE, GEOSEARCHSTORE, GEORADIUS
+ * STORE) replace their destination outright, which is what setKey() does to a
+ * key, and the object stays the same userdata so Lua references keep working.
+ * `dst` must be RL_ZSET or RL_GEO; its kind is preserved. */
+void rl_object_set_zset(rl_object *dst, robj *fresh);
 
 /* RESP reply pushers, one per Redis reply shape (spec §3.2). They keep the
  * mapping table in one place so every command file reads the same way:

@@ -121,7 +121,17 @@ tools/redis-diff/             # 差分对测 harness（§6.2）
 | 双精度数 (addReplyDouble：ZSCORE/ZINCRBY/GEODIST/WITHSCORES) | number |
 | Bulk 可能是 nil | string 或 `false` |
 | 数组 | table（保序保嵌套；`WITHSCORES` 为平铺数组 `[m1,s1,m2,s2...]`） |
-| Error | `lua_error`（消息文本同 Redis） |
+| Error | `lua_error`（消息文本同 Redis 客户端实际读到的文本） |
+
+- 错误文本的"同 Redis"按 `addReplyErrorLength()`（networking.c:657）这一条规则
+  实现：上游自带错误码的消息（源码里以 `-` 开头，如 `-WRONGTYPE ...`、
+  `-INVALIDOBJ ...`、`shared.syntaxerr`）去掉 `-` 原样给出，其余消息补上通用码
+  `ERR `。因此 `ERR syntax error`、`ERR value is not a valid float`、
+  `WRONGTYPE Operation against a key holding the wrong kind of value` 与
+  `skynet.db.redis` 客户端看到的字符串逐字节相同；实现集中在
+  `facade/rl_common.c:rl_error()`，命令文件保留上游原文（含前导 `-`），
+  详见 `redislib-src/NOTICE` 第 7 节。LuaJIT 仍会在最前面加自身的
+  `文件:行号: ` 位置前缀，这是与 RESP 客户端唯一的差别。
 
 ### 3.3 命令面（完整清单）
 - **bitmap (7)**：setbit getbit bitcount(start/end 与 BYTE|BIT) bitpos(bit 值 参数)

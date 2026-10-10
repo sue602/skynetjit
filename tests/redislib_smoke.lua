@@ -172,7 +172,7 @@ local function test_hll()
 	assert(regs[1] == 0 and regs[16384] == 0)
 	d:pfadd("promote-me")
 	assert(d:pfdebug("encoding") == "dense")
-	assert(errtext(function() d:pfdebug("decode") end) == "HLL encoding is not sparse")
+	assert(errtext(function() d:pfdebug("decode") end) == "ERR HLL encoding is not sparse")
 
 	-- sparse stays sparse while it is smaller than hll-sparse-max-bytes
 	local s = hll.new()
@@ -208,26 +208,26 @@ local function test_hll()
 	-- neither AVX2 nor NEON, so the reply is always "disabled"
 	assert(a:pfdebug("simd", "on") == "disabled")
 	assert(a:pfdebug("simd", "off") == "disabled")
-	assert(errtext(function() a:pfdebug("simd", "bogus") end) == "Argument must be ON or OFF")
+	assert(errtext(function() a:pfdebug("simd", "bogus") end) == "ERR Argument must be ON or OFF")
 	assert(errtext(function() a:pfdebug("simd") end) ==
-		"Wrong number of arguments for the 'simd' subcommand")
+		"ERR Wrong number of arguments for the 'simd' subcommand")
 
 	-- PFSELFTEST is the upstream kernel self-test, replies OK
 	assert(a:pfselftest() == "OK")
 
 	-- error texts are the Redis ones
 	assert(errtext(function() a:pfdebug("bogus") end) ==
-		"Unknown PFDEBUG subcommand 'bogus'")
+		"ERR Unknown PFDEBUG subcommand 'bogus'")
 	assert(errtext(function() a:pfdebug("getreg", 1) end) ==
-		"Wrong number of arguments for the 'getreg' subcommand")
+		"ERR Wrong number of arguments for the 'getreg' subcommand")
 	assert(errtext(function() hll.pfcount() end) ==
-		"wrong number of arguments for 'pfcount' command")
+		"ERR wrong number of arguments for 'pfcount' command")
 	local bm = bitmap.new()
 	assert(errtext(function() hll.pfcount(bm) end) ==
 		"WRONGTYPE Operation against a key holding the wrong kind of value")
 	assert(errtext(function() hll.pfmerge(bm, a) end) ==
 		"WRONGTYPE Operation against a key holding the wrong kind of value")
-	assert(errtext(function() a:pfadd({}) end) == "string or number expected, got table")
+	assert(errtext(function() a:pfadd({}) end) == "ERR string or number expected, got table")
 
 	-- an element error mid-loop must not strand the object on the sds the
 	-- kernel already replaced: PFADD writes each result back before the next
@@ -239,7 +239,7 @@ local function test_hll()
 	assert(partial:pfadd("second") == 1)
 	assert(partial:pfcount() == 2)
 	assert(errtext(function() partial:pfdebug("todense", 1) end) ==
-		"Wrong number of arguments for the 'todense' subcommand")
+		"ERR Wrong number of arguments for the 'todense' subcommand")
 	assert(partial:pfdebug("encoding") == "sparse")
 	assert(partial:pfcount() == 2)
 
@@ -273,13 +273,13 @@ local function test_sortedset()
 	assert(b:zadd("1.5", "x") == 1 and b:zscore("x") == 1.5)
 	assert(b:zadd("inf", "hi") == 1 and b:zscore("hi") == math.huge)
 	assert(b:zadd("-inf", "lo") == 1 and b:zscore("lo") == -math.huge)
-	assert(errtext(function() b:zadd("1e400", "q") end) == "value is not a valid float")
-	assert(errtext(function() b:zadd(0 / 0, "q") end) == "value is not a valid float")
-	assert(errtext(function() b:zadd("nan", "q") end) == "value is not a valid float")
-	assert(errtext(function() b:zadd("abc", "q") end) == "value is not a valid float")
+	assert(errtext(function() b:zadd("1e400", "q") end) == "ERR value is not a valid float")
+	assert(errtext(function() b:zadd(0 / 0, "q") end) == "ERR value is not a valid float")
+	assert(errtext(function() b:zadd("nan", "q") end) == "ERR value is not a valid float")
+	assert(errtext(function() b:zadd("abc", "q") end) == "ERR value is not a valid float")
 	-- inf + -inf is NaN, which zsetAdd() refuses with its own text
 	assert(errtext(function() b:zincrby("-inf", "hi") end) ==
-		"resulting score is not a number (NaN)")
+		"ERR resulting score is not a number (NaN)")
 
 	-- ZADD options, one by one and combined
 	local c = sortedset.new()
@@ -297,13 +297,27 @@ local function test_sortedset()
 	assert(c:zscore("a") == 5)
 	assert(c:zadd("incr", "xx", 3, "a") == 8)     -- XX on an existing element: 5 + 3
 	assert(errtext(function() c:zadd("nx", "xx", 1, "a") end) ==
-		"XX and NX options at the same time are not compatible")
+		"ERR XX and NX options at the same time are not compatible")
 	assert(errtext(function() c:zadd("gt", "nx", 1, "a") end) ==
-		"GT, LT, and/or NX options at the same time are not compatible")
+		"ERR GT, LT, and/or NX options at the same time are not compatible")
 	assert(errtext(function() c:zadd("incr", 1, "a", 2, "b") end) ==
-		"INCR option supports a single increment-element pair")
-	assert(errtext(function() c:zadd(1) end) == "syntax error")
-	assert(errtext(function() c:zadd() end) == "syntax error")
+		"ERR INCR option supports a single increment-element pair")
+	assert(errtext(function() c:zadd(1) end) == "ERR syntax error")
+	assert(errtext(function() c:zadd() end) == "ERR syntax error")
+
+	-- A bad pair aborts with the set untouched, whichever half of the pair is
+	-- the bad one: the pre-pass in lzadd_generic() is what makes "fully or
+	-- nothing at all" true here, and it runs before the score vector exists.
+	local before = c:zcard()
+	assert(errtext(function() c:zadd(1, "d", "notanumber", "e") end) ==
+		"ERR value is not a valid float")
+	assert(c:zcard() == before)
+	assert(errtext(function() c:zadd(4, "f", 5, {}) end) ==
+		"ERR string or number expected, got table")
+	assert(c:zcard() == before)
+	assert(errtext(function() c:zadd(4, {}) end) ==
+		"ERR string or number expected, got table")
+	assert(c:zcard() == before)
 
 	-- ZRANK / ZREVRANK, 0-based like the Redis reply, WITHSCORE 8.0 option
 	local r = sortedset.new()
@@ -314,9 +328,9 @@ local function test_sortedset()
 	local ws = r:zrank("b", "withscore")
 	assert(type(ws) == "table" and ws[1] == 1 and ws[2] == 2)
 	assert(r:zrevrank("b", "WITHSCORE")[2] == 2)
-	assert(errtext(function() r:zrank("b", "bogus") end) == "syntax error")
+	assert(errtext(function() r:zrank("b", "bogus") end) == "ERR syntax error")
 	assert(errtext(function() r:zrank("b", "withscore", "x") end) ==
-		"wrong number of arguments for 'zrank' command")
+		"ERR wrong number of arguments for 'zrank' command")
 
 	-- ZMSCORE keeps one array slot per member, false where Redis replies nil
 	local ms = r:zmscore("a", "nope", "c")
@@ -328,12 +342,12 @@ local function test_sortedset()
 	assert(r:zcount("(2", "(3") == 0)
 	assert(r:zcount("2", "1") == 0)
 	assert(r:zcount("-inf", "+inf") == 3)
-	assert(errtext(function() r:zcount("a", 1) end) == "min or max is not a float")
+	assert(errtext(function() r:zcount("a", 1) end) == "ERR min or max is not a float")
 	assert(r:zlexcount("[a", "[c") == 3)
 	assert(r:zlexcount("[a", "(c") == 2)
 	assert(r:zlexcount("-", "+") == 3)
 	assert(errtext(function() r:zlexcount("a", "b") end) ==
-		"min or max not valid string range item")
+		"ERR min or max not valid string range item")
 
 	-- ZREM
 	local d = sortedset.new()
@@ -421,10 +435,10 @@ local function test_sortedset()
 	local f3 = q:zrange("4", "(1", "byscore", "rev", "withscores")
 	assert(f3[1] == "d" and f3[2] == 4 and f3[3] == "c")
 	assert(errtext(function() q:zrange(0, 1, "limit", 0, 1) end) ==
-		"syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX")
+		"ERR syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX")
 	assert(errtext(function() q:zrange(0, -1, "bylex", "withscores") end) ==
-		"syntax error, WITHSCORES not supported in combination with BYLEX")
-	assert(errtext(function() q:zrange(0, -1, "bogus") end) == "syntax error")
+		"ERR syntax error, WITHSCORES not supported in combination with BYLEX")
+	assert(errtext(function() q:zrange(0, -1, "bogus") end) == "ERR syntax error")
 
 	-- ZRANGEBYLEX / ZREVRANGEBYLEX never carry scores
 	assert(#q:zrangebylex("[b", "[c") == 2)
@@ -432,7 +446,7 @@ local function test_sortedset()
 	assert(lx[1] == "c" and lx[2] == "b")
 	assert(q:zrangebylex("[b", "[c", "limit", 1, 1)[1] == "c")
 	assert(errtext(function() q:zrangebylex("b", "c") end) ==
-		"min or max not valid string range item")
+		"ERR min or max not valid string range item")
 
 	-- ZRANGESTORE replaces the destination and replies how many it stored
 	local st = sortedset.new()
@@ -448,7 +462,7 @@ local function test_sortedset()
 	assert(q:zrangestore(q, 0, -1) == 4 and q:zcard() == 4)
 	assert(q:zrange(0, -1)[4] == "d")
 	-- withscores is not a ZRANGESTORE option
-	assert(errtext(function() q:zrangestore(q, 0, -1, "withscores") end) == "syntax error")
+	assert(errtext(function() q:zrangestore(q, 0, -1, "withscores") end) == "ERR syntax error")
 
 	-- the same walks over the skiplist encoding
 	local bqr = sortedset.new()
@@ -483,8 +497,8 @@ local function test_sortedset()
 	assert(p:zcard() == 0)
 	assert(#p:zpopmin() == 0)                       -- empty again: an empty result
 	assert(#p:zpopmax(0) == 0)                      -- ...must not free uninitialised memory
-	assert(errtext(function() p:zpopmin(-1) end) == "value is out of range, must be positive")
-	assert(errtext(function() p:zpopmin(1, 2) end) == "syntax error")
+	assert(errtext(function() p:zpopmin(-1) end) == "ERR value is out of range, must be positive")
+	assert(errtext(function() p:zpopmin(1, 2) end) == "ERR syntax error")
 
 	-- ZMPOP picks the first operand that still holds elements; a handle stands
 	-- for the key name Redis replies
@@ -498,12 +512,12 @@ local function test_sortedset()
 	assert(sortedset.zmpop({e1}, "max") == false)   -- nothing to pop anywhere: nil
 	local mpc = sortedset.zmpop({e2}, "max", "count", 5)
 	assert(#mpc[2] == 1 and mpc[2][1][1] == "ten" and e2:zcard() == 0)
-	assert(errtext(function() sortedset.zmpop({e2}, "bogus") end) == "syntax error")
+	assert(errtext(function() sortedset.zmpop({e2}, "bogus") end) == "ERR syntax error")
 	assert(errtext(function() sortedset.zmpop({e2}, "min", "count", 0) end) ==
-		"count should be greater than 0")
+		"ERR count should be greater than 0")
 	assert(errtext(function() sortedset.zmpop({}, "min") end) ==
-		"numkeys should be greater than 0")
-	assert(errtext(function() sortedset.zmpop({e2}, "min", "count") end) == "syntax error")
+		"ERR numkeys should be greater than 0")
+	assert(errtext(function() sortedset.zmpop({e2}, "min", "count") end) == "ERR syntax error")
 
 	-- ZRANDMEMBER: assert the shapes and the reachability, not the draw
 	local rr = sortedset.new()
@@ -525,8 +539,8 @@ local function test_sortedset()
 			"unexpected pair "..tostring(m))
 	end
 	assert(#rr:zrandmember(-50) == 50)              -- negative count repeats
-	assert(errtext(function() rr:zrandmember(1, "bogus") end) == "syntax error")
-	assert(errtext(function() rr:zrandmember(1, "withscores", "x") end) == "syntax error")
+	assert(errtext(function() rr:zrandmember(1, "bogus") end) == "ERR syntax error")
+	assert(errtext(function() rr:zrandmember(1, "withscores", "x") end) == "ERR syntax error")
 
 	-- the same on the skiplist encoding, which covers CASE 3 (count*3 > size)
 	-- and CASE 4 (the set is much bigger than the count)
@@ -549,7 +563,7 @@ local function test_sortedset()
 	for k = 1, #many do dedup[many[k]] = true end
 	assert(#many == 20 and next(dedup))
 	assert(errtext(function() bg:zrandmember(1.5) end) ==
-		"value is not an integer or out of range")
+		"ERR value is not an integer or out of range")
 
 	-- a member that looks like a number keeps the decimal string Redis replies
 	local num = sortedset.new()
@@ -607,23 +621,23 @@ local function test_sortedset()
 
 	-- error texts are the Redis ones
 	assert(errtext(function() sortedset.zunion({}) end) ==
-		"at least 1 input key is needed for 'zunion' command")
+		"ERR at least 1 input key is needed for 'zunion' command")
 	assert(errtext(function() sortedset.zdiff({u1, u2}, "aggregate", "max") end) ==
-		"syntax error")
+		"ERR syntax error")
 	assert(errtext(function() sortedset.zunion({u1, u2}, "weights", {1}) end) ==
-		"syntax error")
+		"ERR syntax error")
 	assert(errtext(function() sortedset.zunion({u1, u2}, "weights", {"x", 1}) end) ==
-		"weight value is not a float")
+		"ERR weight value is not a float")
 	assert(errtext(function() sortedset.zunion({u1, bitmap.new()}) end) ==
 		"WRONGTYPE Operation against a key holding the wrong kind of value")
 	assert(errtext(function() s1:zunionstore({u1, u2}, "withscores") end) ==
-		"syntax error")
+		"ERR syntax error")
 	assert(errtext(function() sortedset.zintercard({u1, u2}, "withscores") end) ==
-		"syntax error")
+		"ERR syntax error")
 	assert(errtext(function() sortedset.zintercard({u1, u2}, "limit", -1) end) ==
-		"LIMIT can't be negative")
+		"ERR LIMIT can't be negative")
 	assert(errtext(function() sortedset.zintercard({u1, u2}, "aggregate", "sum") end) ==
-		"syntax error")
+		"ERR syntax error")
 
 	-- free() releases the object; a second use is an error, and __gc on a freed
 	-- object must not double free
@@ -637,10 +651,222 @@ local function test_sortedset()
 	collectgarbage("collect")
 end
 
+local function test_geo()
+	local geo = require "geo"
+	local bitmap = require "bitmap"
+
+	-- The Sicily data set of the Redis GEO documentation, so the numbers below
+	-- are Redis' published replies and not self-consistency: GEODIST Palermo
+	-- Catania = 166274.1516 m, and from (15,37) Catania is 56.4413 km away and
+	-- Palermo 190.4424 km.
+	local g = geo.new()
+	assert(g:geoadd(13.361389, 38.115556, "Palermo") == 1)
+	assert(g:geoadd(15.087269, 37.502669, "Catania") == 1)
+	assert(g:geoadd(13.361389, 38.115556, "Palermo") == 0)
+
+	-- GEODIST, in each unit
+	assert(math.abs(g:geodist("Palermo", "Catania") - 166274.1516) < 1e-4)
+	assert(math.abs(g:geodist("Palermo", "Catania", "km") - 166.2742) < 1e-4)
+	assert(math.abs(g:geodist("Palermo", "Catania", "mi") - 103.3182) < 1e-4)
+	assert(math.abs(g:geodist("Palermo", "Catania", "ft") - 545518.87) < 1e-2)
+	-- the unit words only divide, so all four must stay consistent with metres
+	assert(math.abs(g:geodist("Palermo", "Catania") / 1609.34 -
+		g:geodist("Palermo", "Catania", "mi")) < 1e-3)
+	assert(g:geodist("Palermo", "nowhere") == false)
+	assert(errtext(function() g:geodist("Palermo", "Catania", "furlong") end) ==
+		"ERR unsupported unit provided. please use M, KM, FT, MI")
+	assert(errtext(function() g:geodist("Palermo", "Catania", "m", "x") end) ==
+		"ERR syntax error")
+
+	-- GEOPOS decodes the 52-bit geohash back: 26 bits per axis is about 1.7 m
+	-- of resolution, so 1e-5 degrees is the accuracy Redis documents.
+	local pos = g:geopos("Palermo", "nowhere", "Catania")
+	assert(#pos == 3 and pos[2] == false)
+	assert(math.abs(pos[1][1] - 13.361389) < 1e-5)
+	assert(math.abs(pos[1][2] - 38.115556) < 1e-5)
+	assert(math.abs(pos[3][1] - 15.087269) < 1e-5)
+
+	-- GEOHASH: 11 characters of the geohash alphabet, false for a missing one
+	local gh = g:geohash("Palermo", "nowhere")
+	assert(#gh == 2 and gh[2] == false)
+	assert(#gh[1] == 11)
+	assert(gh[1]:match("^[0123456789bcdefghjkmnpqrstuvwxyz]+$") ~= nil)
+	assert(gh[1]:sub(1, 2) == "sq")            -- western Sicily
+	assert(gh[1] == g:geohash("Palermo")[1])   -- deterministic
+
+	-- GEORADIUS without a sort option is a set, not an order
+	local r = g:georadius(15, 37, 200, "km")
+	assert(#r == 2)
+	local seen = {}
+	for _, m in ipairs(r) do seen[m] = true end
+	assert(seen.Palermo and seen.Catania)
+	local near1 = g:georadius(15, 37, 100, "km")
+	assert(#near1 == 1 and near1[1] == "Catania")
+	assert(#g:georadius(0, 0, 1, "km") == 0)
+
+	-- WITHDIST / WITHCOORD, in the documented ASC order
+	local asc = g:georadius(15, 37, 200, "km", "asc", "withdist", "withcoord")
+	assert(#asc == 2 and asc[1][1] == "Catania" and asc[2][1] == "Palermo")
+	assert(math.abs(asc[1][2] - 56.4413) < 1e-4)
+	assert(math.abs(asc[2][2] - 190.4424) < 1e-4)
+	-- WITHCOORD is the decoded position, so the accuracy is the geohash
+	-- resolution (~1.7 m), not the input: compare against the encoded value.
+	assert(math.abs(asc[1][3][1] - 15.087269) < 1e-5)
+	assert(math.abs(asc[1][3][2] - 37.502669) < 1e-5)
+	assert(asc[1][3][1] == pos[3][1] and asc[1][3][2] == pos[3][2])  -- same decode
+	assert(g:georadius(15, 37, 200, "km", "desc")[1] == "Palermo")
+	assert(#g:georadius(15, 37, 200, "km", "count", 1) == 1)
+	assert(#g:georadius(15, 37, 200, "km", "count", 1, "any") == 1)
+	-- WITHHASH is the raw 52-bit score, i.e. what the backing zset holds
+	local hashes = {}
+	for _, it in ipairs(g:georadius(15, 37, 200, "km", "withhash")) do
+		hashes[it[1]] = it[2]
+	end
+	assert(hashes.Palermo and hashes.Catania and hashes.Palermo ~= hashes.Catania)
+	assert(hashes.Catania == math.floor(hashes.Catania))
+
+	-- GEORADIUSBYMEMBER shares the option grammar
+	local bym = g:georadiusbymember("Catania", 200, "km", "asc")
+	assert(bym[1] == "Catania" and bym[2] == "Palermo")
+	assert(errtext(function() g:georadiusbymember("nowhere", 1, "km") end) ==
+		"ERR could not decode requested zset member")
+	assert(errtext(function() g:georadius(15, 37, -1, "km") end) ==
+		"ERR radius cannot be negative")
+	assert(errtext(function() g:georadius(15, 37, "x", "km") end) ==
+		"ERR need numeric radius")
+	assert(errtext(function() g:georadius(15, 37, 1, "km", "count", 0) end) ==
+		"ERR COUNT must be > 0")
+	assert(errtext(function() g:georadius(15, 37, 1, "km", "any") end) ==
+		"ERR the ANY argument requires COUNT argument")
+	assert(errtext(function() g:georadius(200, 37, 1, "km") end) ==
+		"ERR invalid longitude,latitude pair 200.000000,37.000000")
+	assert(errtext(function() g:georadius(15, 37, 1, "km", "withdist", "store", g) end) ==
+		"ERR STORE option in GEORADIUS is not compatible with WITHDIST, WITHHASH and WITHCOORD options")
+
+	-- STORE writes a geoset: the members come back at their own positions
+	local dst = geo.new()
+	assert(g:georadius(15, 37, 200, "km", "asc", "store", dst) == 2)
+	assert(math.abs(dst:geodist("Palermo", "Catania") - 166274.1516) < 1e-4)
+	-- STOREDIST writes the distance as the score instead
+	local dst2 = geo.new()
+	assert(g:georadius(15, 37, 200, "km", "asc", "storedist", dst2) == 2)
+	local stored = {}
+	for _, it in ipairs(dst2:georadiusbymember("Catania", 40000, "km", "withhash")) do
+		stored[it[1]] = it[2]
+	end
+	assert(stored.Catania and stored.Palermo and stored.Catania ~= stored.Palermo)
+	-- an empty result empties the destination (Redis deletes the key)
+	assert(g:georadius(0, 0, 1, "km", "store", dst) == 0)
+	assert(#dst:georadius(0, 0, 40000, "km") == 0)
+	assert(errtext(function() g:georadius_ro(15, 37, 200, "km", "store", dst) end) ==
+		"ERR syntax error")
+
+	-- GEOSEARCH: the FROM*/BY* matrix
+	assert(#g:geosearch("fromlonlat", 15, 37, "byradius", 200, "km", "asc") == 2)
+	assert(g:geosearch("fromlonlat", 15, 37, "byradius", 200, "km", "asc")[1] == "Catania")
+	assert(#g:geosearch("frommember", "Catania", "byradius", 200, "km") == 2)
+	assert(#g:geosearch("fromlonlat", 15, 37, "byradius", 50, "km") == 0)
+	assert(#g:geosearch("fromlonlat", 15, 37, "bybox", 400, 400, "km") == 2)
+	assert(#g:geosearch("fromlonlat", 15, 37, "bybox", 10, 10, "km") == 0)
+	assert(errtext(function() g:geosearch("fromlonlat", 15, 37) end) ==
+		"ERR exactly one of BYRADIUS and BYBOX can be specified for geosearch")
+	assert(errtext(function() g:geosearch("byradius", 200, "km") end) ==
+		"ERR exactly one of FROMMEMBER or FROMLONLAT can be specified for geosearch")
+	assert(errtext(function() g:geosearch("frommember", "nowhere", "byradius", 1, "km") end) ==
+		"ERR could not decode requested zset member")
+
+	-- GEOSEARCHSTORE, both call shapes, and STOREDIST
+	local gs = geo.new()
+	assert(geo.geosearchstore(gs, g, "fromlonlat", 15, 37, "byradius", 200, "km") == 2)
+	assert(math.abs(gs:geodist("Palermo", "Catania") - 166274.1516) < 1e-4)
+	local gs2 = geo.new()
+	assert(gs2:geosearchstore(g, "frommember", "Catania", "byradius", 200, "km",
+		"storedist") == 2)
+	assert(#gs2:georadiusbymember("Catania", 40000, "km") == 2)
+	assert(errtext(function() geo.geosearchstore(gs, g, "fromlonlat", 15, 37,
+		"byradius", 200, "km", "store") end) == "ERR syntax error")
+
+	-- the anti-meridian. A search from the west side finds the point that is
+	-- 0.02 degrees away across 180 degrees, and so does one from -180; a search
+	-- from exactly +180 finds only the east side. That asymmetry is Redis' own:
+	-- the geohash box of a point at +180 saturates, so its neighbour boxes never
+	-- wrap (kernel/geohash_helper.c, verbatim). Asserting it here so a future
+	-- "fix" is a deliberate decision and not a silent drift from the server.
+	local p = geo.new()
+	assert(p:geoadd(-179.99, 0, "west") == 1)
+	assert(p:geoadd(179.99, 0, "east") == 1)
+	assert(p:geoadd(0, 0, "greenwich") == 1)
+	local near = {}
+	for _, m in ipairs(p:georadius(-180, 0, 50, "km")) do near[m] = true end
+	assert(near.west and near.east and not near.greenwich)
+	near = {}
+	for _, m in ipairs(p:georadiusbymember("west", 50, "km")) do near[m] = true end
+	assert(near.west and near.east and not near.greenwich)
+	near = {}
+	for _, m in ipairs(p:georadius(180, 0, 5000, "km")) do near[m] = true end
+	assert(near.east and not near.west)
+	assert(math.abs(p:geodist("west", "east") - 2224.9614) < 1e-4)
+	assert(math.abs(p:geodist("west", "greenwich") - 20019621.8176) < 1e-2)
+
+	-- GEOADD option words, and the triple-count check
+	local opt = geo.new()
+	assert(opt:geoadd("nx", 1, 1, "a") == 1)
+	assert(opt:geoadd("nx", 2, 2, "a") == 0)
+	assert(opt:geoadd("xx", 3, 3, "a") == 0)
+	assert(opt:geoadd("xx", 4, 4, "b") == 0)                 -- XX does not add
+	assert(opt:geoadd("ch", "xx", 5, 5, "a") == 1)
+	assert(math.abs(opt:geopos("a")[1][1] - 5) < 1e-5)
+	assert(#opt:geopos("b") == 1)
+	assert(errtext(function() opt:geoadd("nx", "xx", 1, 1, "c") end) == "ERR syntax error")
+	assert(errtext(function() opt:geoadd(1, 1) end) == "ERR syntax error")
+	assert(errtext(function() opt:geoadd("bogus", 1, 1, "c") end) == "ERR syntax error")
+
+	-- A bad pair leaves nothing behind, in either half of it: the first pass of
+	-- lgeoadd() validates every coordinate and every element type before the
+	-- first zsetAdd(), the way upstream's ZADD vector is built before the key is
+	-- touched. Without that pass "f" would already be in the geoset when the
+	-- second pair's element raised.
+	assert(errtext(function() opt:geoadd(6, 6, "f", 7, 7, {}) end) ==
+		"ERR string or number expected, got table")
+	assert(opt:geopos("f")[1] == false)
+	assert(errtext(function() opt:geoadd(200, 200, "g", 7, 7, "h") end) ==
+		"ERR invalid longitude,latitude pair 200.000000,200.000000")
+	assert(opt:geopos("g")[1] == false and opt:geopos("h")[1] == false)
+
+	-- Types still apply where an argument is a handle: a geoset command's source
+	-- has to be a geoset, while a STORE target may be a geoset or a plain
+	-- sorted set (that is the type Redis writes there). A non-numeric argument
+	-- is the float error instead, because that is the check Redis makes first.
+	local plain = require("sortedset").new()
+	plain:zadd(1, "not-a-geohash")
+	assert(errtext(function() geo.geosearchstore(geo.new(), plain, "fromlonlat", 15, 37,
+		"byradius", 200, "km") end) ==
+		"WRONGTYPE Operation against a key holding the wrong kind of value")
+	assert(errtext(function() g:georadius(15, 37, 1, "km", "store", bitmap.new()) end) ==
+		"WRONGTYPE Operation against a key holding the wrong kind of value")
+	assert(errtext(function() g:georadius(bitmap.new(), 37, 1, "km") end) ==
+		"ERR value is not a valid float")
+	assert(g:georadius(15, 37, 200, "km", "asc", "store", plain) == 2)
+	-- the stored scores are the geohashes, exactly what WITHHASH reported
+	assert(plain:zcard() == 2 and plain:zscore("Catania") == hashes.Catania
+		and plain:zscore("Palermo") == hashes.Palermo)
+
+	-- free() / __gc
+	local t = geo.new()
+	t:geoadd(1, 1, "x")
+	t:free()
+	assert(pcall(function() t:geopos("x") end) == false)
+	local t2 = geo.new()
+	t2:geoadd(1, 1, "gc")
+	t2 = nil
+	collectgarbage("collect")
+end
+
 local tests = {
 	{ "bitmap", test_bitmap },
 	{ "hll", test_hll },
 	{ "sortedset", test_sortedset },
+	{ "geo", test_geo },
 }
 
 local function run()

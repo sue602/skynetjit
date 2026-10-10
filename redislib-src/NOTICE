@@ -114,10 +114,18 @@ Files copied verbatim except for include lines (edit A + C):
 
 Files copied verbatim, no code change at all (edit C only):
     endianconv.c  fpconv_dtoa.c  geohash.c  geohash_helper.c  mt19937-64.c
-    sha256.c  siphash.c
+    pqsort.c  sha256.c  siphash.c
+        (pqsort.c is added by Task 5: geo.c's partial sort for
+         GEORADIUS/GEOSEARCH `COUNT n` without ANY. It is the NetBSD qsort
+         variant upstream ships, deps-free.)
     adlist.h  config.h  debugmacro.h  dict.h  endianconv.h  fast_float_strtod.h
     fmacros.h  geohash.h  geohash_helper.h  intset.h  listpack.h  monotonic.h
-    mt19937-64.h  sds.h  sha256.h  util.h
+    mt19937-64.h  pqsort.h  sds.h  sha256.h  util.h
+
+Files copied with the include swap only (edit A), needed by the geo facade:
+    geo.h           geoPoint / geoArray, `#include "server.h"` ->
+                    `#include "redislib_port.h"` (the two typedefs use nothing
+                    but double / size_t, so nothing else had to change)
 
 Different upstream directory:
     $RSRC/deps/fpconv/fpconv_dtoa.c   -> kernel/fpconv_dtoa.c
@@ -134,8 +142,12 @@ Not from Redis (authored for this port):
     redislib-src/facade/bitmap.c             the redis.bitmap command facade
     redislib-src/facade/hll.c                the redis.hll command facade
     redislib-src/facade/sortedset.c          the redis.sortedset command facade
-    redislib-src/lua/{bitmap,hll,sortedset}.lua  require shims for the business
-                                             names
+    redislib-src/facade/geo_sem.{c,h}        the geoset semantics layer, i.e.
+                                             geo.c's non-command part rewritten
+                                             against the Lua reply model
+    redislib-src/facade/geo.c                the redis.geo command facade
+    redislib-src/lua/{bitmap,hll,sortedset,geo}.lua  require shims for the
+                                             business names
     tools/redislib-harness.c                 Task 1 self check, never shipped
     tools/run-harness-wsl.sh                 harness regression runner
 
@@ -164,7 +176,8 @@ neither HAVE_AVX2 nor HAVE_AARCH64_NEON, so the kernel compiles the scalar
 paths).
 
 Same technique, earlier: `kernel/t_zset.h` is the sorted-set/skiplist type and
-API block lifted verbatim out of `server.h` (see section 3).
+API block lifted verbatim out of `server.h` (see section 3), and
+`facade/zset_int.h` (§3.2) is the second copy made the same way.
 
 3.2 Verbatim copy #2 -- facade/zset_int.h
 -----------------------------------------
@@ -360,6 +373,13 @@ point to lift the shared declarations into a facade header.
 5. Verification
 ---------------
 
+Line-ending note for every byte comparison below: the project default is
+`* text=auto`, which would hand a Windows checkout CRLF files while `$RSRC` is
+LF. `.gitattributes` pins `redislib-src/**` and the two redislib test files to
+`eol=lf` so the comparison works in any checkout; if a comparison ever reports
+*every* line changed, that is a line-ending artefact -- strip the CR
+(`sed 's/\r$//'`) before believing it.
+
 `tools/redislib-harness.c` is a pure-C assertion program over the ported kernels
 (geohash encode/decode round trip and the distance helpers, HLL 10k cardinality
 inside +/-2% plus sparse->dense and hllMerge, dict insert/rehash/lookup/delete
@@ -424,6 +444,14 @@ Two more warning classes are suppressed for the kernel objects only, by
               invalid_hll_err (the facades re-declare the text).
 
 
+Geo verification (Task 5): the ten GEO* commands of spec §3.3 are in the same
+smoke test, on the data set of Redis' own GEO documentation (Palermo / Catania),
+so the distances and coordinates it asserts are Redis' published replies:
+`geodist` = 166274.1516 m and its km/mi/ft quotients, and from (15,37) Catania
+is 56.4413 km away with Palermo 190.4424 km, in ASC order, to 1e-4. The
+anti-meridian case asserts Redis' own asymmetry (see §6) instead of a hoped-for
+behaviour.
+
 Sorted-set specific verification (Task 4): all 31 commands of spec §3.3 run in
 `tests/redislib_smoke.lua`, on both encodings (the facade switches to the
 skiplist past `zset_max_listpack_entries` on its own, and the test asserts both
@@ -476,3 +504,63 @@ one array table (Redis' `numkeys` integer has nothing to count here).
 Scores are Lua numbers in both directions (spec §3.1's type principle); on the
 wire Redis sends a double as a bulk string, so `tools/redis-diff` compares them
 numerically.
+
+Geo: `GEOADD` reads CH itself (upstream leaves CH to the `zaddCommand()` it
+re-dispatches to, and there is no re-dispatch here); the option words are still
+accepted in the same positions, and the reply rule is upstream's -- `CH` makes
+it count updates as well as additions. `STORE` / `STOREDIST` name a handle
+instead of a key, and that handle may be a geoset or a plain sorted set, which
+is the type Redis writes there. `WITHHASH` truncates to an integer like
+`addReplyLongLong()`, so with a STOREDIST-written target (whose scores are
+distances, not geohashes) it reports the truncated distance, exactly as the
+server does. Distances are the value Redis *renders* -- four decimals, then read
+back as a number -- not the full-precision double, so a client switching between
+a real server and this library sees the same quantity.
+Searching from exactly +180 longitude finds only the points east of the
+antimeridian, even with an 5000 km radius: `geohashCalculateAreasByShapeWGS84()`
+saturates the box at +180 and the neighbour boxes never wrap. That is upstream's
+behaviour (the kernel is verbatim), not the port's, and the smoke test asserts
+it on purpose: a search from -180, and one from a member at -179.99, do find
+both sides.
+
+7. Error replies: the code a client sees
+-----------------------------------------
+
+`rl_error()` (facade/rl_common.c) is the port of `addReplyErrorLength()`
+(networking.c:657), and it is the only place that decides how an error reads:
+
+    if (!len || s[0] != '-') addReplyProto(c,"-ERR ",5);
+
+Upstream's rule is that a message carrying its own error code writes the code
+into the string with a leading dash -- `"-WRONGTYPE Key is not a valid
+HyperLogLog string value."` (hyperloglog.c:1636), `"-INVALIDOBJ Corrupted HLL
+object detected"` (hyperloglog.c:208), `shared.syntaxerr` = `"-ERR syntax
+error\r\n"` (server.c:2225) -- and every other message gets the generic code.
+So the text a client actually reads is `WRONGTYPE ...` for the first group and
+`ERR syntax error`, `ERR need numeric radius`, `ERR value is not a valid float`
+for the second.
+
+The facade call sites keep upstream's literals *including* the leading dash, and
+`rl_error()` applies the one rule, so a Lua caller of any redislib command sees
+exactly the text a Redis client sees for the same failure -- which is what makes
+switching a call site from `skynet.db.redis` to these modules a non-event for
+error handling. Formatting goes through `sdscatvprintf()`, the same call
+`addReplyErrorFormatInternal()` uses, so `"%f"` renders identically (`invalid
+longitude,latitude pair 200.000000,37.000000`). LuaJIT still prepends its usual
+`file:line: ` position to the raised message, like any other Lua error; that is
+the one difference from a RESP client, and `errtext()` in the smoke test strips
+it.
+
+Two texts are the facade's own, because Redis has no equivalent failure:
+`"string or number expected, got %s"` (a Lua argument can be a table or a
+handle, a RESP argument cannot) and the `luaL_checkstring()` "bad argument"
+message that option words produce when handed a non-string. Upstream cannot
+express either -- every element of `c->argv` is already a string there -- so
+these read as Lua errors with the generic code in front of them.
+
+That claim is checked, not asserted: a scan of the facades' 112 `rl_error(L,
+"...")` sites against `$RSRC` finds 110 whose literal appears verbatim in the
+pristine tree (allowing for the `\r\n` that the `shared.*` error objects carry),
+and the 2 remaining ones are the sentence above. The PFCOUNT arity message goes
+through `'%s' command` with the name passed as an argument for exactly that
+reason: no facade literal is a paraphrase of a Redis message.

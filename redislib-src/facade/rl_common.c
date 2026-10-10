@@ -3,6 +3,9 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdarg.h>
+#include <math.h>
+#include <limits.h>
 
 #include "rl_common.h"
 
@@ -15,14 +18,86 @@ static const char *const class_names[] = {
     "redis.geo",
 };
 
+int rl_error(lua_State *L, const char *fmt, ...) {
+    va_list ap;
+    sds msg;
+
+    /* sdscatvprintf() is what addReplyErrorFormatInternal() uses, so a format
+     * string renders here exactly as it does in the server. */
+    va_start(ap, fmt);
+    msg = sdscatvprintf(sdsempty(), fmt, ap);
+    va_end(ap);
+
+    if (msg[0] == '-') lua_pushstring(L, msg + 1);
+    else lua_pushfstring(L, "ERR %s", msg);
+    sdsfree(msg);
+
+    luaL_where(L, 1);
+    lua_insert(L, -2);
+    lua_concat(L, 2);
+    return lua_error(L);
+}
+
 rl_object *rl_check(lua_State *L, int idx, rl_kind kind) {
     rl_object *o = (rl_object *)lua_touserdata(L, idx);
     if (!o || o->kind != kind) {
         /* Mirrors checkType() on a live server: the "key" here is the object
          * the method was called on. */
-        luaL_error(L, "WRONGTYPE Operation against a key holding the wrong kind of value");
+        rl_error(L, "-WRONGTYPE Operation against a key holding the wrong kind of value");
     }
     return o;
+}
+
+int rl_todouble(lua_State *L, int idx, double *v) {
+    if (lua_type(L, idx) == LUA_TNUMBER) {
+        *v = lua_tonumber(L, idx);
+        if (isnan(*v)) return C_ERR;
+        return C_OK;
+    }
+    if (lua_type(L, idx) == LUA_TSTRING) {
+        const char *s = lua_tostring(L, idx);
+
+        if (!string2d(s, lua_objlen(L, idx), v) || isnan(*v)) return C_ERR;
+        return C_OK;
+    }
+    return C_ERR;
+}
+
+double rl_checkdouble(lua_State *L, int idx) {
+    double v;
+
+    if (rl_todouble(L, idx, &v) != C_OK)
+        rl_error(L, "value is not a valid float");
+    return v;
+}
+
+int rl_tolong(lua_State *L, int idx, long long *out) {
+    if (lua_type(L, idx) == LUA_TNUMBER) {
+        double d = lua_tonumber(L, idx);
+        long long v;
+
+        if (!isfinite(d)) return C_ERR;
+        v = (long long)d;
+        if ((double)v != d) return C_ERR;   /* not an integer, or past the range */
+        *out = v;
+        return C_OK;
+    }
+    if (lua_type(L, idx) == LUA_TSTRING)
+        return string2ll(lua_tostring(L, idx), lua_objlen(L, idx), out) ?
+            C_OK : C_ERR;
+    return C_ERR;
+}
+
+/* getLongFromObjectOrReply() (object.c:1255): the shared failure text comes
+ * from getLongLongFromObjectOrReply(), the narrowing one is its own. */
+long rl_checklong(lua_State *L, int idx) {
+    long long v;
+
+    if (rl_tolong(L, idx, &v) != C_OK)
+        rl_error(L, "value is not an integer or out of range");
+    if (v < LONG_MIN || v > LONG_MAX)
+        rl_error(L, "value is out of range");
+    return (long)v;
 }
 
 void rl_free_zset(robj *zobj) {
@@ -39,6 +114,26 @@ void rl_free_zset(robj *zobj) {
         zfree(zs);
     }
     zfree(zobj);
+}
+
+void rl_checkmember(lua_State *L, int idx) {
+    if (!lua_isstring(L, idx))
+        rl_error(L, "string or number expected, got %s",
+                 lua_typename(L, lua_type(L, idx)));
+}
+
+sds rl_member(lua_State *L, int idx) {
+    const char *s;
+    size_t len;
+
+    rl_checkmember(L, idx);
+    s = lua_tolstring(L, idx, &len);
+    return sdsnewlen(s, len);
+}
+
+void rl_object_set_zset(rl_object *dst, robj *fresh) {
+    rl_free_zset(dst->zobj);
+    dst->zobj = fresh;
 }
 
 void rl_free_ud(lua_State *L, void *p) {

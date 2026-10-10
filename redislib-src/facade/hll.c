@@ -40,11 +40,11 @@ uint64_t hllCount(struct hllhdr *hdr, int *invalid);
 
 /* hyperloglog.c:209, the reply text of every corrupted-value error (addReplyError
  * strips the leading '-'). */
-static const char *invalid_hll_err = "INVALIDOBJ Corrupted HLL object detected";
+static const char *invalid_hll_err = "-INVALIDOBJ Corrupted HLL object detected";
 
 /* isHLLObjectOrReply()'s reply text, hyperloglog.c:1636-1637. */
 static const char *not_hll_err =
-    "WRONGTYPE Key is not a valid HyperLogLog string value.";
+    "-WRONGTYPE Key is not a valid HyperLogLog string value.";
 
 /* ---- argument helpers --------------------------------------------------- */
 
@@ -67,15 +67,15 @@ rl_checkhll(lua_State *L, rl_object *o) {
     struct hllhdr *hdr;
 
     if (o->str == NULL || sdslen(o->str) < sizeof(*hdr))
-        luaL_error(L, "%s", not_hll_err);
+        rl_error(L, "%s", not_hll_err);
     hdr = (struct hllhdr*)o->str;
     if (hdr->magic[0] != 'H' || hdr->magic[1] != 'Y' ||
         hdr->magic[2] != 'L' || hdr->magic[3] != 'L')
-        luaL_error(L, "%s", not_hll_err);
+        rl_error(L, "%s", not_hll_err);
     if (hdr->encoding > HLL_MAX_ENCODING)
-        luaL_error(L, "%s", not_hll_err);
+        rl_error(L, "%s", not_hll_err);
     if (hdr->encoding == HLL_DENSE && sdslen(o->str) != HLL_DENSE_SIZE)
-        luaL_error(L, "%s", not_hll_err);
+        rl_error(L, "%s", not_hll_err);
 }
 
 /* One PFADD element: the bytes of a Lua string (or of a number's decimal
@@ -86,7 +86,7 @@ rl_checkhll(lua_State *L, rl_object *o) {
 static unsigned char *
 rl_element(lua_State *L, int idx, size_t *len) {
     if (!lua_isstring(L, idx))
-        luaL_error(L, "string or number expected, got %s",
+        rl_error(L, "string or number expected, got %s",
                    lua_typename(L, lua_type(L, idx)));
     return (unsigned char*)lua_tolstring(L, idx, len);
 }
@@ -183,7 +183,7 @@ lhll_pfadd(lua_State *L) {
         retval = hllAdd(&tmp, ele, len);
         o->str = tmp.ptr;
         if (retval == 1) updated++;
-        else if (retval == -1) luaL_error(L, "%s", invalid_hll_err);
+        else if (retval == -1) rl_error(L, "%s", invalid_hll_err);
     }
 
     hdr = (struct hllhdr*)o->str;
@@ -203,8 +203,9 @@ lhll_pfcount(lua_State *L) {
 
     if (n == 0) {
         /* rl: upstream replies :0 for a missing key; here an operand list is
-         * built from arguments, so "no operands" is a Lua-side arity error. */
-        return luaL_error(L, "wrong number of arguments for 'pfcount' command");
+         * built from arguments, so "no operands" is a Lua-side arity error,
+         * worded the way the server's own arity check words it for PFCOUNT. */
+        return rl_error(L, "wrong number of arguments for '%s' command", "pfcount");
     }
 
     if (n > 1) {
@@ -226,7 +227,7 @@ lhll_pfcount(lua_State *L) {
             rl_checkhll(L, o);
             rl_hll_view(&tmp, o);
             if (hllMerge(registers,&tmp) == C_ERR) {
-                luaL_error(L, "%s", invalid_hll_err);
+                rl_error(L, "%s", invalid_hll_err);
             }
         }
         rl_pushint(L,(long long)hllCount(hdr,NULL));
@@ -259,7 +260,7 @@ lhll_pfcount(lua_State *L) {
         } else {
             int invalid = 0;
             card = hllCount(hdr,&invalid);
-            if (invalid) luaL_error(L, "%s", invalid_hll_err);
+            if (invalid) rl_error(L, "%s", invalid_hll_err);
             hdr->card[0] = card & 0xff;
             hdr->card[1] = (card >> 8) & 0xff;
             hdr->card[2] = (card >> 16) & 0xff;
@@ -302,7 +303,7 @@ lhll_pfmerge(lua_State *L) {
         if (hdr->encoding == HLL_DENSE) use_dense = 1;
 
         if (hllMerge(max,&tmp) == C_ERR) {
-            luaL_error(L, "%s", invalid_hll_err);
+            rl_error(L, "%s", invalid_hll_err);
         }
     }
 
@@ -313,7 +314,7 @@ lhll_pfmerge(lua_State *L) {
 
     if (use_dense && hllSparseToDense(&tmp) == C_ERR) {
         dest->str = tmp.ptr;
-        luaL_error(L, "%s", invalid_hll_err);
+        rl_error(L, "%s", invalid_hll_err);
     }
 
     if (use_dense) {
@@ -361,12 +362,12 @@ lhll_pfdebug(lua_State *L) {
          * always "disabled" -- the same answer a scalar Redis build gives.
          * Argument validation stays, so misuse is still reported. */
         if (top != 3)
-            return luaL_error(L,
+            return rl_error(L,
                 "Wrong number of arguments for the '%s' subcommand", cmd);
         if (!strcasecmp(luaL_checkstring(L, 3),"on")) {
         } else if (!strcasecmp(luaL_checkstring(L, 3),"off")) {
         } else {
-            luaL_error(L, "Argument must be ON or OFF");
+            rl_error(L, "Argument must be ON or OFF");
         }
         lua_pushliteral(L, "disabled");
         return 1;
@@ -380,14 +381,14 @@ lhll_pfdebug(lua_State *L) {
     if (!strcasecmp(cmd,"getreg")) {
         int j;
         if (top != 2)
-            return luaL_error(L,
+            return rl_error(L,
                 "Wrong number of arguments for the '%s' subcommand", cmd);
 
         hdr = (struct hllhdr*)tmp.ptr;
         if (hdr->encoding == HLL_SPARSE) {
             if (hllSparseToDense(&tmp) == C_ERR) {
                 o->str = tmp.ptr;
-                luaL_error(L, "%s", invalid_hll_err);
+                rl_error(L, "%s", invalid_hll_err);
             }
             o->str = tmp.ptr; /* Force the encoding change to stick. */
         }
@@ -408,7 +409,7 @@ lhll_pfdebug(lua_State *L) {
         sds decoded;
 
         if (top != 2)
-            return luaL_error(L,
+            return rl_error(L,
                 "Wrong number of arguments for the '%s' subcommand", cmd);
 
         p = (uint8_t*)o->str;
@@ -418,7 +419,7 @@ lhll_pfdebug(lua_State *L) {
         hdr = (struct hllhdr*)o->str;
         if (hdr->encoding != HLL_SPARSE) {
             sdsfree(decoded);
-            luaL_error(L, "HLL encoding is not sparse");
+            rl_error(L, "HLL encoding is not sparse");
         }
 
         p += HLL_HDR_SIZE;
@@ -449,7 +450,7 @@ lhll_pfdebug(lua_State *L) {
     else if (!strcasecmp(cmd,"encoding")) {
         static const char *encodingstr[2] = {"dense","sparse"};
         if (top != 2)
-            return luaL_error(L,
+            return rl_error(L,
                 "Wrong number of arguments for the '%s' subcommand", cmd);
         hdr = (struct hllhdr*)o->str;
         lua_pushstring(L, encodingstr[hdr->encoding]);
@@ -459,14 +460,14 @@ lhll_pfdebug(lua_State *L) {
     else if (!strcasecmp(cmd,"todense")) {
         int conv = 0;
         if (top != 2)
-            return luaL_error(L,
+            return rl_error(L,
                 "Wrong number of arguments for the '%s' subcommand", cmd);
 
         hdr = (struct hllhdr*)tmp.ptr;
         if (hdr->encoding == HLL_SPARSE) {
             if (hllSparseToDense(&tmp) == C_ERR) {
                 o->str = tmp.ptr;
-                luaL_error(L, "%s", invalid_hll_err);
+                rl_error(L, "%s", invalid_hll_err);
             }
             o->str = tmp.ptr;
             conv = 1;
@@ -474,7 +475,7 @@ lhll_pfdebug(lua_State *L) {
         rl_pushint(L, conv);
         return 1;
     } else {
-        return luaL_error(L,"Unknown PFDEBUG subcommand '%s'", cmd);
+        return rl_error(L,"Unknown PFDEBUG subcommand '%s'", cmd);
     }
 }
 
@@ -510,7 +511,7 @@ lhll_pfselftest(lua_State *L) {
                 sdsfree(bitcounters);
                 /* The casts are upstream's own: addReplyErrorFormat() gets %d
                  * and (int) arguments, and HLL_REGISTER_MAX fits in an int. */
-                return luaL_error(L,
+                return rl_error(L,
                     "TESTFAILED Register %d should be %d but is %d",
                     (int)i, (int)bytecounters[i], (int)val);
             }
@@ -534,14 +535,14 @@ lhll_pfselftest(lua_State *L) {
             hdr2 = (struct hllhdr*)o->ptr;
             if (hdr2->encoding != HLL_SPARSE) {
                 sdsfree(bitcounters); sdsfree(o->ptr); zfree(o);
-                return luaL_error(L, "TESTFAILED sparse encoding not used");
+                return rl_error(L, "TESTFAILED sparse encoding not used");
             }
         }
 
         if (j == (unsigned int)checkpoint &&
             hllCount(hdr,NULL) != hllCount((struct hllhdr*)o->ptr,NULL)) {
             sdsfree(bitcounters); sdsfree(o->ptr); zfree(o);
-            return luaL_error(L, "TESTFAILED dense/sparse disagree");
+            return rl_error(L, "TESTFAILED dense/sparse disagree");
         }
 
         if (j == (unsigned int)checkpoint) {
@@ -553,7 +554,7 @@ lhll_pfselftest(lua_State *L) {
             if (abserr < 0) abserr = -abserr;
             if (abserr > (int64_t)maxerr) {
                 sdsfree(bitcounters); sdsfree(o->ptr); zfree(o);
-                return luaL_error(L,
+                return rl_error(L,
                     "TESTFAILED Too big error. card:%llu abserr:%llu",
                     (unsigned long long) checkpoint,
                     (unsigned long long) abserr);

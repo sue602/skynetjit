@@ -49,7 +49,7 @@ int checkSignedBitfieldOverflow(int64_t value, int64_t incr, uint64_t bits, int 
 
 #define RL_POPCOUNT(p,n) redisPopcount((void*)(p),(long)(n))
 
-/* LuaJIT's lauxlib.h does not mark luaL_error() noreturn (upstream Lua 5.2+
+/* LuaJIT's lauxlib.h does not mark rl_error() noreturn (upstream Lua 5.2+
  * does), so the compiler cannot see that the argument parsing below has no
  * fall-through path. The range/opcode variables get sentinel initialisers:
  * every reachable path assigns them before use. */
@@ -64,7 +64,7 @@ rl_checklonglong(lua_State *L, int idx, const char *err) {
         double d = lua_tonumber(L, idx);
         long long v = (long long)d;
         if ((double)v == d) return v;
-        luaL_error(L, "%s", err);
+        rl_error(L, "%s", err);
     }
     if (lua_isstring(L, idx)) {
         size_t l;
@@ -72,7 +72,7 @@ rl_checklonglong(lua_State *L, int idx, const char *err) {
         long long v;
         if (string2ll(s, l, &v)) return v;
     }
-    luaL_error(L, "%s", err);
+    rl_error(L, "%s", err);
     return 0; /* unreachable */
 }
 
@@ -87,20 +87,20 @@ rl_bitoffset(lua_State *L, int idx, int hash, int bits) {
         const char *p = lua_tolstring(L, idx, &plen);
         int usehash = (p[0] == '#' && hash && bits > 0);
         if (string2ll(p+usehash, plen-usehash, &loffset) == 0 || loffset < 0)
-            luaL_error(L, "%s", err);
+            rl_error(L, "%s", err);
         if (usehash) {
-            if (loffset > LLONG_MAX / bits) luaL_error(L, "%s", err);
+            if (loffset > LLONG_MAX / bits) rl_error(L, "%s", err);
             loffset *= bits;
         }
     } else if (lua_isnumber(L, idx)) {
         double d = lua_tonumber(L, idx);
         loffset = (long long)d;
-        if ((double)loffset != d || loffset < 0) luaL_error(L, "%s", err);
+        if ((double)loffset != d || loffset < 0) rl_error(L, "%s", err);
     } else {
-        luaL_error(L, "%s", err);
+        rl_error(L, "%s", err);
         return 0; /* unreachable */
     }
-    if ((loffset >> 3) >= RL_PROTO_MAX_BULK_LEN) luaL_error(L, "%s", err);
+    if ((loffset >> 3) >= RL_PROTO_MAX_BULK_LEN) rl_error(L, "%s", err);
     return (uint64_t)loffset;
 }
 
@@ -111,7 +111,7 @@ rl_unit_arg(lua_State *L, int idx, int *isbit) {
     const char *u = lua_tolstring(L, idx, &l);
     if (u && !strcasecmp(u, "bit")) *isbit = 1;
     else if (u && !strcasecmp(u, "byte")) *isbit = 0;
-    else luaL_error(L, "syntax error");
+    else rl_error(L, "-ERR syntax error");
 }
 
 /* ---- SETBIT / GETBIT ---------------------------------------------------- */
@@ -125,7 +125,7 @@ lbitmap_setbit(lua_State *L) {
     size_t byte, bit;
     int byteval, bitval;
 
-    if (on & ~1) luaL_error(L, "%s", err);
+    if (on & ~1) rl_error(L, "%s", err);
 
     byte = bitoffset >> 3;
     if (sdslen(o->str) < byte + 1)          /* lookupStringForBitCommand */
@@ -191,7 +191,7 @@ lbitmap_bitcount(lua_State *L) {
         start = 0;
         end = strlen_-1;
     } else {
-        luaL_error(L, "syntax error");
+        rl_error(L, "-ERR syntax error");
     }
 
     if (start > end) { rl_pushint(L, 0); return 1; }
@@ -223,7 +223,7 @@ lbitmap_bitpos(lua_State *L) {
     unsigned char first_byte_neg_mask = 0, last_byte_neg_mask = 0;
 
     if (bit != 0 && bit != 1)
-        luaL_error(L, "bit is not an integer or out of range");
+        rl_error(L, "bit is not an integer or out of range");
 
     if (argc >= 1) {
         long long totlen = strlen_;
@@ -316,12 +316,12 @@ lbitmap_bitop(lua_State *L) {
     else if ((opname[0]=='d'||opname[0]=='D') && !strcasecmp(opname,"diff1")) op = BITOP_DIFF1;
     else if ((opname[0]=='a'||opname[0]=='A') && !strcasecmp(opname,"andor")) op = BITOP_ANDOR;
     else if ((opname[0]=='o'||opname[0]=='O') && !strcasecmp(opname,"one"))   op = BITOP_ONE;
-    else luaL_error(L, "syntax error");
+    else rl_error(L, "-ERR syntax error");
 
     luaL_checktype(L, 2, LUA_TTABLE);
     numkeys = (unsigned long)lua_objlen(L, 2);
     if (op == BITOP_NOT && numkeys != 1)
-        luaL_error(L, "BITOP NOT must be called with a single source key.");
+        rl_error(L, "BITOP NOT must be called with a single source key.");
     if ((op == BITOP_DIFF || op == BITOP_DIFF1 || op == BITOP_ANDOR) && numkeys < 2) {
         char buf[128];
         sds up = sdsnew(opname);
@@ -329,9 +329,9 @@ lbitmap_bitop(lua_State *L) {
         snprintf(buf, sizeof(buf),
             "BITOP %s must be called with at least two source keys.", (char*)up);
         sdsfree(up);
-        luaL_error(L, "%s", buf);
+        rl_error(L, "%s", buf);
     }
-    if (numkeys == 0) luaL_error(L, "wrong number of arguments");
+    if (numkeys == 0) rl_error(L, "wrong number of arguments");
 
     src = zmalloc(sizeof(unsigned char*) * numkeys);
     len = zmalloc(sizeof(unsigned long) * numkeys);
@@ -515,14 +515,14 @@ rl_bitfield_type(lua_State *L, int idx, int *sign, int *bits) {
     const char *p = lua_tolstring(L, idx, &plen);
     long long llbits;
 
-    if (!p) luaL_error(L, "%s", err);
+    if (!p) rl_error(L, "%s", err);
     if (p[0] == 'i') *sign = 1;
     else if (p[0] == 'u') *sign = 0;
-    else luaL_error(L, "%s", err);
+    else rl_error(L, "%s", err);
 
     if (string2ll(p+1, plen-1, &llbits) == 0 || llbits < 1 ||
         (*sign == 1 && llbits > 64) || (*sign == 0 && llbits > 63))
-        luaL_error(L, "%s", err);
+        rl_error(L, "%s", err);
     *bits = (int)llbits;
 }
 
@@ -555,11 +555,11 @@ bitmap_bitfield_generic(lua_State *L, int ro_cmd) {
             if (!strcasecmp(owtypename,"wrap")) owtype = BFOVERFLOW_WRAP;
             else if (!strcasecmp(owtypename,"sat")) owtype = BFOVERFLOW_SAT;
             else if (!strcasecmp(owtypename,"fail")) owtype = BFOVERFLOW_FAIL;
-            else { zfree(ops); luaL_error(L, "Invalid OVERFLOW type specified"); }
+            else { zfree(ops); rl_error(L, "Invalid OVERFLOW type specified"); }
             continue;
         } else {
             zfree(ops);
-            luaL_error(L, "syntax error");
+            rl_error(L, "-ERR syntax error");
         }
 
         rl_bitfield_type(L, j+1, &sign, &bits);
@@ -586,7 +586,7 @@ bitmap_bitfield_generic(lua_State *L, int ro_cmd) {
 
     if (!readonly && ro_cmd) {
         zfree(ops);
-        luaL_error(L, "BITFIELD_RO only supports the GET subcommand");
+        rl_error(L, "BITFIELD_RO only supports the GET subcommand");
     }
 
     if (!readonly) {
