@@ -984,6 +984,16 @@ lrank_generic(lua_State *L, int reverse, const char *cmdname) {
     }
 
     ele = rl_member(L, 2);
+    /* rl: zsetRank() starts at the listpack's first entry and asserts that one
+     * exists (t_zset.c:1816), which on a server is unreachable because a sorted
+     * set with no members is a missing key and ZRANK of a missing key replies nil.
+     * A handle that emptied out stays addressable here, so the empty case is
+     * answered before the walk -- the same reply, for the same reason. */
+    if (zsetLength(zobj) == 0) {
+        sdsfree(ele);
+        rl_pushnilreply(L);
+        return 1;
+    }
     rank = zsetRank(zobj, ele, reverse, opt_withscore ? &score : NULL);
     sdsfree(ele);
 
@@ -1405,6 +1415,12 @@ lzrandmember(lua_State *L) {
 
     /* If count is zero, serve it ASAP to avoid special cases later. */
     if (count == 0) { lua_createtable(L, 0, 0); return 1; }
+
+    /* rl: on a server an empty sorted set is a missing key, and the command's
+     * lookup already replies the empty array for that (t_zset.c:3325). A handle
+     * that emptied out stays addressable here, and every case below asks the
+     * kernel for a member of a non-empty set, so the same reply is given here. */
+    if (size == 0) { lua_createtable(L, 0, 0); return 1; }
 
     /* CASE 1: a negative count samples "return N random elements" repeatedly,
      * and count == 1 needs no auxiliary structure. The only case that also

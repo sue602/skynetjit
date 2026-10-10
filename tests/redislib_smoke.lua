@@ -54,12 +54,17 @@ local function test_bitmap()
 	bp:setbit(3, 1)
 	assert(bp:bitpos(1) == 3)
 	assert(bp:bitpos(0) == 0)
-	assert(bp:bitpos(1, 4) == false)     -- start byte beyond range -> empty -> false
+	assert(bp:bitpos(1, 4) == -1)      -- start byte beyond the value -> empty range -> -1
 	assert(bp:bitpos(1, 0, 0) == 3)      -- byte 0 only
+	-- Redis never answers nil for BITPOS: an empty range holds neither a 0 nor a 1
+	-- (bitops.c:890), and a key that is not there is "an infinite array of 0 bits",
+	-- so the first clear bit is 0 and there is no set bit to find (bitops.c:884).
+	assert(bitmap.new():bitpos(1) == -1)
+	assert(bitmap.new():bitpos(0) == 0)
 	local full = bitmap.new()
 	for i = 0, 7 do full:setbit(i, 1) end
 	assert(full:bitpos(0) == 8)          -- implicit zeros right after the string
-	assert(full:bitpos(0, 0, 7) == false) -- explicit end inside range: no clear bit
+	assert(full:bitpos(0, 0, 7) == -1)  -- explicit range with no clear bit -> -1, never nil
 
 	-- error texts
 	assert(pcall(function() b:setbit(0, 2) end) == false)
@@ -161,6 +166,20 @@ local function test_hll()
 	assert(m:pfcount() == 6)
 	assert(m:pfadd("q") == 1)
 	assert(m:pfcount() == 7)
+
+	-- The destination is part of the merge: upstream's loop runs over every key of
+	-- the command starting at argv[1] = the destination, so PFMERGE keeps what the
+	-- destination already held, and `pfmerge(dest, {dest})` is the documented no-op.
+	local md = hll.new()
+	assert(md:pfadd("x1", "x2", "x3") == 1)
+	assert(md:pfmerge({md}) == "OK" and md:pfcount() == 3)
+	local ms = hll.new()
+	assert(ms:pfadd("y1", "y2") == 1)
+	assert(hll.pfmerge(md, {ms}) == "OK" and md:pfcount() == 5)
+	-- a destination left out of the source list still contributes its own registers
+	local only = hll.new()
+	assert(only:pfadd("z1", "z2", "z3") == 1)
+	assert(hll.pfmerge(only, {hll.new()}) == "OK" and only:pfcount() == 3)
 
 	-- PFDEBUG ENCODING / TODENSE / GETREG
 	local d = hll.new()
@@ -318,6 +337,23 @@ local function test_sortedset()
 	assert(errtext(function() c:zadd(4, {}) end) ==
 		"ERR string or number expected, got table")
 	assert(c:zcard() == before)
+
+	-- A handle that emptied out stays addressable (NOTICE 6: there is no key to
+	-- delete), which is a state a server cannot express -- its empty sorted set IS
+	-- a missing key, and every kernel walk below assumes a first entry exists.
+	-- The differential harness found the two that did not guard it.
+	local gone = sortedset.new()
+	gone:zadd(1, "only")
+	assert(gone:zrem("only") == 1 and gone:zcard() == 0)
+	assert(gone:zrank("only") == false and gone:zrevrank("only") == false)
+	assert(gone:zrank("only", "withscore") == false)
+	assert(gone:zrandmember() == false)
+	assert(#gone:zrandmember(3) == 0 and #gone:zrandmember(-3) == 0)
+	assert(#gone:zrandmember(2, "withscores") == 0)
+	assert(#gone:zpopmin(2) == 0 and #gone:zrange(0, -1) == 0)
+	assert(gone:zscore("only") == false and gone:zcount("-inf", "+inf") == 0)
+	assert(#gone:zrangebyscore(0, 10, "withscores") == 0)
+	assert(gone:zadd(5, "again") == 1 and gone:zrank("again") == 0)
 
 	-- ZRANK / ZREVRANK, 0-based like the Redis reply, WITHSCORE 8.0 option
 	local r = sortedset.new()
@@ -854,6 +890,22 @@ local function test_geo()
 	-- free() / __gc
 	local t = geo.new()
 	t:geoadd(1, 1, "x")
+	-- An unresolvable member: a live server only reaches longLatFromMember() for a
+	-- key that exists, so "could not decode requested zset member" is what a member
+	-- missing from a *present* geoset gets, while a missing source key answers the
+	-- empty array (0 for a STORE target) without ever resolving. An empty handle is
+	-- that missing key here -- the differential harness found the two mixed up.
+	local empt = geo.new()
+	assert(#empt:georadiusbymember("nope", 100, "km") == 0)
+	assert(#empt:geosearch("frommember", "nope", "byradius", 100, "km") == 0)
+	local edst = geo.new()
+	assert(empt:georadiusbymember("nope", 100, "km", "store", edst) == 0)
+	assert(#edst:georadius(15, 37, 5000, "km") == 0)
+	assert(errtext(function() g:georadiusbymember("nosuchmember", 100, "km") end) ==
+		"ERR could not decode requested zset member")
+	assert(errtext(function() g:geosearch("frommember", "nosuch", "byradius", 10, "km") end) ==
+		"ERR could not decode requested zset member")
+
 	t:free()
 	assert(pcall(function() t:geopos("x") end) == false)
 	local t2 = geo.new()

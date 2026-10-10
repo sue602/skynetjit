@@ -287,7 +287,12 @@ lhll_pfmerge(lua_State *L) {
     int j, use_dense = 0;
 
     memset(max,0,sizeof(max));
-    rl_hll_iter(&it, L, 2);
+    /* Upstream's merge loop runs from argv[1], which is the destination key, so a
+     * PFMERGE carries the destination's own registers into the result as well --
+     * PFMERGE dest dest is the documented no-op, and a destination that already
+     * holds elements keeps them. Starting the iterator at the receiver is what
+     * reproduces that here; the write below happens after every read. */
+    rl_hll_iter(&it, L, 1);
 
     while ((src = rl_hll_next(&it)) != NULL) {
         rl_checkhll(L, src);
@@ -304,8 +309,8 @@ lhll_pfmerge(lua_State *L) {
     }
 
     /* rl: upstream creates the destination key when missing; here the object
-     * the command writes to is always the one passed in. */
-    rl_checkhll(L, dest);
+     * the command writes to is always the one passed in, and the loop above
+     * already proved it is an HLL. */
     rl_hll_view(&tmp, dest);
 
     if (use_dense && hllSparseToDense(&tmp) == C_ERR) {

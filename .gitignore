@@ -1,3 +1,9 @@
 /build/
 *.log
 .superpowers/
+
+# redis-diff run artifacts (oplog, recordings, diff output)
+tools/redis-diff/work/
+
+# python bytecode from the redis-diff harness
+tools/redis-diff/__pycache__/

@@ -251,12 +251,19 @@ lbitmap_bitpos(lua_State *L) {
         end = strlen_-1;
     }
 
-    /* rl: an empty object plays the role of the missing key. */
+    /* rl: an empty object plays the role of the missing key, and Redis' answer for
+     * a missing key is a number, never a nil: the key is "an infinite array of 0
+     * bits", so the first clear bit is 0 and there is no set bit to find (bitops.c
+     * looks it up as `bit ? -1 : 0`). A live server does distinguish the two -- a
+     * key set to the empty string takes the empty-range answer below -- but with no
+     * keyspace here there is nothing to distinguish, and the missing-key reading is
+     * the one that matches an object no write has touched. */
     if (strlen_ == 0) {
-        if (bit) rl_pushnilreply(L); else rl_pushint(L, 0);
+        rl_pushint(L, bit ? -1 : 0);
         return 1;
     }
-    if (start > end) { rl_pushnilreply(L); return 1; }
+    /* Also for an empty range: it contains neither a 0 nor a 1 bit (bitops.c:890). */
+    if (start > end) { rl_pushint(L, -1); return 1; }
     {
         long bytes = (long)(end-start+1);
         long long pos = -1;
@@ -287,12 +294,16 @@ lbitmap_bitpos(lua_State *L) {
             pos = redisBitpos(&tmpchar, 1, (int)bit);
         }
     result:
-        if (end_given && bit == 0 && pos == (long long)bytes<<3) {
-            rl_pushnilreply(L);
+        /* bitops.c:872 -- BITPOS has no nil reply at all. A range that was given
+         * explicitly and holds no clear bit answers -1, and a scan that found
+         * nothing answers -1 as it is; only a found position gets the skipped
+         * bytes added back. */
+        if (end_given && bit == 0 && pos == ((long long)bytes<<3)) {
+            rl_pushint(L, -1);
             return 1;
         }
-        if (pos == -1) { rl_pushnilreply(L); return 1; }
-        rl_pushint(L, pos + (start<<3));
+        if (pos != -1) pos += (long long)start<<3; /* Adjust for bytes skipped. */
+        rl_pushint(L, pos);
     }
     return 1;
 }

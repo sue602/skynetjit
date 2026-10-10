@@ -150,6 +150,13 @@ Not from Redis (authored for this port):
                                              business names
     tools/redislib-harness.c                 Task 1 self check, never shipped
     tools/run-harness-wsl.sh                 harness regression runner
+    tools/redis-diff/*                       the differential harness against a live
+                                             redis-server 8.10.0 (gen.lua, two
+                                             replays, diff.py, the spec §4 interop
+                                             check). Manual, never shipped, not part
+                                             of the one-shot test; its own README
+                                             and REPORT-2026-10-10.md say what it
+                                             covers and what it found.
 
 
 3.1 Verbatim copies kept outside kernel/
@@ -413,6 +420,24 @@ Redis reply shapes and the upstream error texts. It is green on both platforms:
 `build.sh` on Windows and `build-linux.sh` under WSL Ubuntu 24.04 print
 `redislib-smoke: redislib modules succeeded`.
 
+Differential check against a live server (`tools/redis-diff`, manual by design --
+it needs a second build and a running process, so it is not in the one-shot test):
+`gen.lua` writes a deterministic operation log, `replay_redis.py` runs it against
+`redis-server` 8.10.0 built from `$RSRC` over a bare RESP2 socket, `replay_lib.lua`
+runs the same log through the modules inside skynet, and `diff.py` compares the two
+recordings. Each step also snapshots the *state* of the keys it touched with
+read-only commands both sides have (`GET`/`BITCOUNT`, `PFCOUNT`,
+`ZRANGE 0 -1 WITHSCORES`), as hex, so a command whose reply is deliberately shaped
+differently here (BITOP answers a handle, ZMPOP answers a handle where Redis answers
+a key name) is still compared through what it left behind. First run: 4000 ops,
+53 commands, 1721 state probes, 0 unexplained differences and 9 that are the two
+documented deviations in section 6; `interop.sh` adds the spec §4 round trip in both
+directions, 15 checks. Five real defects came out of it -- `ZRANK` and counted
+`ZRANDMEMBER` crashing on a handle that emptied out, three `BITPOS` replies that
+were nil where Redis always answers a number, `PFMERGE` losing the destination's own
+registers, and the search family raising where Redis answers the empty array -- all
+described with their evidence in `tools/redis-diff/REPORT-2026-10-10.md`.
+
 Scope note: the harness is a Linux-native-gcc program (WSL Ubuntu 24.04, gcc
 13.3.0).
 
@@ -552,19 +577,44 @@ with the wrong length gets `WRONGTYPE Key is not a valid HyperLogLog string
 value.`). Because PFCOUNT caches its estimate inside the value, as the server
 does, a `dump()` taken after a count differs by those 8 bytes from one taken
 before it -- the same two sketches converge once both have been counted, which
-the smoke test asserts. The sorted-set family uses the small non-RDB layout
-spec §4 defines (`uint32 count + (float64 score, uint32 len, bytes member)*`,
-integers written with shifts so the blob is little-endian on any host, records
-in ascending score order so one set always writes one blob). It is deliberately
-not Redis' DUMP format, which is RDB plus a CRC64 trailer and is not what "a
-skynet service can store this in any medium" needs; a blob is replayed against a
-real server with ZADD / GEOADD instead, and the smoke test hand-decodes one to
-prove no reader needs a Redis library. Loading validates the shape strictly --
-a count that cannot be filled from the remaining bytes is refused *before* the
-dictionary is sized from it, and trailing bytes, truncation, and a NaN score all
-raise `Bad data format`, upstream's own reply for a serialized payload it cannot
-parse (`cluster.c:290`). `+inf` and `-inf` are legal scores there because ZADD
-accepts them.
+the smoke test asserts, and `tools/redis-diff/interop.sh` asserts against a live
+server. The sorted-set family uses the small non-RDB layout spec §4 defines
+(`uint32 count + (float64 score, uint32 len, bytes member)*`, integers written
+with shifts so the blob is little-endian on any host, records in ascending score
+order so one set always writes one blob). It is deliberately not Redis' DUMP
+format, which is RDB plus a CRC64 trailer and is not what "a skynet service can
+store this in any medium" needs; a blob is replayed against a real server with
+ZADD / GEOADD instead, and the smoke test hand-decodes one to prove no reader
+needs a Redis library. Loading validates the shape strictly -- a count that
+cannot be filled from the remaining bytes is refused *before* the dictionary is
+sized from it, and trailing bytes, truncation, and a NaN score all raise
+`Bad data format`, upstream's own reply for a serialized payload it cannot parse
+(`cluster.c:290`). `+inf` and `-inf` are legal scores there because ZADD accepts
+them.
+
+Two more classes of difference are visible from a live server and were confirmed
+by `tools/redis-diff` rather than reasoned about in advance. Both sides still
+answer the same *shape*; only the text or the precondition differs:
+
+`no-command-table` -- Redis rejects a command that is too short from the `arity`
+field of its command table, before the handler ever runs. This port has no command
+table, so the handler's own complaint is what surfaces: `GEOSEARCH key
+FROMLONLAT 15 37` (no BYRADIUS/BYBOX) gets
+`ERR wrong number of arguments for 'geosearch' command` from a server and
+`ERR exactly one of BYRADIUS and BYBOX can be specified for geosearch` here. Both
+are Redis' own sentences; which of the two fires is the difference.
+
+`no-keyspace` -- a command that looks its key up on the server can be told the key
+is not there, and says so: `PFDEBUG todense missingkey` replies
+`ERR The specified key does not exist`. There is no such lookup here -- the object
+is the receiver -- so the command runs on the untouched handle. The same fact,
+*applied* where it changes an answer rather than an error, is the rule the search
+commands follow now: `GEORADIUSBYMEMBER`/`GEOSEARCH FROMMEMBER` of an unresolvable
+member raise on a server only when the source key exists, and reply the empty
+array (0 and a cleared destination with `STORE`) when it does not, so an empty
+handle takes the latter route. `ZRANK`, `ZRANDMEMBER <count>` and `BITPOS` on an
+emptied handle take their server counterparts' answers for the same reason; see
+`tools/redis-diff/REPORT-2026-10-10.md` for how each was found.
 
 7. Error replies: the code a client sees
 -----------------------------------------

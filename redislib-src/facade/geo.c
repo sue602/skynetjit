@@ -295,6 +295,23 @@ lgeopos(lua_State *L) {
 
 /* ---- the search family -------------------------------------------------- */
 
+/* The FROMMEMBER / GEORADIUSBYMEMBER answer, split the way the server's is.
+ *
+ * A live server reaches longLatFromMember() only for a key that exists, so there a
+ * member that cannot be decoded is a genuine error, while an absent source key
+ * skips the resolution entirely (geo.c:541 and geo.c:624) and takes the "return
+ * ASAP when src key does not exist" route after the options are parsed. An empty
+ * handle is that absent key here, so the same route is taken: C_OK with *no_source
+ * set. A non-empty geoset and a member that is not in it still raises, as it does
+ * on a server. */
+static int
+rl_geo_member_or_empty(lua_State *L, robj *zobj, sds member, double *xy,
+                       int *no_source) {
+    if (rl_geoLongLatFromMember(zobj, member, xy) == C_OK) return C_OK;
+    if (zsetLength(zobj) == 0) { *no_source = 1; return C_OK; }
+    return rl_error(L, "could not decode requested zset member"), C_ERR;
+}
+
 /* georadiusGeneric() -- geo.c:524.
  *
  * The option grammar is upstream's, one word per Lua argument, with two
@@ -313,6 +330,7 @@ rl_geosearch_generic(lua_State *L, int srcidx, int flags) {
     int frommember = 0, fromloc = 0, byradius = 0, bybox = 0;
     int sort = RL_SORT_NONE, any = 0;
     long long count = 0;
+    int no_source = 0;
     int top = lua_gettop(L), i;
     GeoHashRadius georadius;
     geoArray *ga;
@@ -332,10 +350,9 @@ rl_geosearch_generic(lua_State *L, int srcidx, int flags) {
 
         base_args = 5;
         shape.type = CIRCULAR_TYPE;
-        rc = rl_geoLongLatFromMember(zobj, member, shape.xy);
+        rc = rl_geo_member_or_empty(L, zobj, member, shape.xy, &no_source);
         sdsfree(member);
-        if (rc == C_ERR)
-            return rl_error(L, "could not decode requested zset member");
+        if (rc == C_ERR) return 1;          /* the helper raised */
         rl_geoDistanceArg(L, base_args-2, &shape.conversion, &shape.t.radius);
     } else if (flags & RL_GEOSEARCH) {
         base_args = 2;
@@ -399,11 +416,11 @@ rl_geosearch_generic(lua_State *L, int srcidx, int flags) {
                        (i+1) < remaining && flags & RL_GEOSEARCH && !fromloc)
             {
                 sds member = rl_member(L, base_args+i+1);
-                int rc = rl_geoLongLatFromMember(zobj, member, shape.xy);
+                int rc = rl_geo_member_or_empty(L, zobj, member, shape.xy,
+                                                &no_source);
 
                 sdsfree(member);
-                if (rc == C_ERR)
-                    return rl_error(L, "could not decode requested zset member");
+                if (rc == C_ERR) return 1;  /* the helper raised */
                 frommember = 1;
                 i++;
             } else if (!strcasecmp(arg, "fromlonlat") &&
@@ -458,6 +475,19 @@ rl_geosearch_generic(lua_State *L, int srcidx, int flags) {
      * order to return the closest N entries), force ASC ordering if COUNT was
      * specified but no sorting was requested. Not needed for ANY. */
     if (count != 0 && sort == RL_SORT_NONE && !any) sort = RL_SORT_ASC;
+
+    /* rl: an empty source took the place of the missing key, whose answer the
+     * server gives here, after the option traps and before any search: the store
+     * target is cleared and the reply is 0, otherwise the empty array. */
+    if (no_source) {
+        if (storekey) {
+            rl_object_set_zset(storekey, zsetTypeCreate(0, 0));
+            rl_pushint(L, 0);
+        } else {
+            lua_createtable(L, 0, 0);
+        }
+        return 1;
+    }
 
     /* Get all neighbor geohash boxes for our radius search. */
     georadius = geohashCalculateAreasByShapeWGS84(&shape);
