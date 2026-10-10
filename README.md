@@ -82,6 +82,10 @@ epoll。Windows 只支持 wepoll 后端。
 - `--no-netbull`：跳过 `luaclib-src/` 的 7 个 NetBull Lua C 库（cjson、luacurl、
   lfs、pb、sqlite3、zlib、zset）及其 Lua 叠加文件；Windows 下同时不下载、不编译
   zlib/libcurl/CMake 依赖，Linux 下跳过 libcurl/zlib 开发包检查。默认编译这些库；
+- `--no-redislib`：跳过 `redislib-src/` 的 Redis 8.10.0 算法内核与 4 个 Lua C 模块
+  （bitmap、hll、sortedset、geo），不产出 `luaclib/redis/*.so`，也不叠加
+  `lualib/{bitmap,hll,sortedset,geo}.lua`，一键测试里的 redislib 冒烟同样跳过。
+  默认编译，可用 `--redislib` 显式恢复；
 - `--jobs N`：设置并行编译任务数。
 
 也可以只更新源码：
@@ -98,6 +102,7 @@ Windows 主要文件在 `build/out`：
 - `luajit.exe`、`lua51.dll`；
 - `cservice/*.so`；
 - `luaclib/*.so`；
+- `luaclib/redis/*.so`（redislib 的 4 个模块）与 `lualib/` 中的同名包装文件；
 - Skynet 的 `lualib`、`service` 和 `examples`。
 
 Linux 对应文件在 `build/linux-out`，包括 `skynet`、`libskynet.so`、`luajit`、
@@ -137,6 +142,23 @@ skynet.exe examples\config
   sqlite3、zlib、zset/skiplist）源码，作为本仓库的 vendored 目录参与双平台构建，
   产物为 `luaclib/*.so`；`zset.lua` 与 `protoc.lua` 会叠加到输出的 `lualib/`。
   这些库不修改任何子模块，可用 `--no-netbull` 整组关闭。
+- `redislib-src/` 把 Redis 8.10.0 的 Bitmap、HyperLogLog、Sorted Set、Geo 四组算法
+  内核移植成进程内 Lua 库，命令面共 53 个：bitmap 7、hll 5、sortedset 31（该版本
+  全部非阻塞 `Z*` 去掉 `ZSCAN`）、geo 10。内核文件只做三种机械编辑——include 换成
+  本仓库的 shim、删掉 `xxxCommand(client*)` 命令层、加一行移植说明——`sds`、`dict`、
+  `listpack`、`intset`、`adlist`、`t_zset`、`hyperloglog`、`bitops`、`geo`、
+  `geohash*`、`pqsort`、`util`、`crc16` 等的算法行不动。`redislib-src/NOTICE` 逐节
+  记录文件映射、shim 符号清单、与真 Redis 的偏差清单，以及许可依据：本移植按
+  **内部自用**推进（Redis 源码为 AGPLv3/RSALv2/SSPLv1），若要对外分发或托管需
+  重新评估。
+- redislib 的业务入口是 `require "bitmap"`／`"hll"`／`"sortedset"`／`"geo"`，C 模块
+  在子命名空间 `redis.<name>`（`luaclib/redis/*.so`）。方法名就是 Redis 命令名的小写，
+  包装层另给大写别名（`z:ZADD`）与表形态入参（`z:zadd(1,"a",2,"b")` 与
+  `z:zadd({{1,"a"},{2,"b"}})` 等价、`z:zrange(0,-1,{withscores=true,pairs=true})`）。
+  返回值按 RESP 回包结构映射，Redis 的 nil 回复对应 `false`，错误用 Redis 客户端
+  实际读到的文本（`ERR syntax error`、`WRONGTYPE …`）。对象是 handle，不是 key：
+  没有 keyspace，`obj:dump()` 取值字节、`Mod.load(str)` 装回来，可与真 Redis 双向搬运
+  （bitmap/hll 与 `GET`/`SET` 逐字节一致，sortedset/geo 用非 RDB 的小端简单格式）。
 - Windows 构建会先由 `scripts/fetch-deps.sh` 把 zlib 与 libcurl 源码下载到
   `build/deps` 缓存，并用便携版 CMake 静态编译（libcurl 启用 Schannel HTTPS 与
   zlib），随后整体链接进 `luacurl.so` 和 `zlib.so`，输出目录不需要额外 DLL。
@@ -150,7 +172,12 @@ Skynet，验证 sharetable 的循环图、重复引用、函数、lightuserdata�
 再完成监听 socket 与 `skynet.abort` 正常退出。另有一项 NetBull luaclib 冒烟测试，
 在 Skynet 服务内验证 cjson JSON 往返、lfs 目录属性、zlib 压缩往返（走
 `skynet_malloc`）、内存 SQLite 增删查、zset 有序集合排名、luacurl 句柄与选项、以及
-protoc+pb 的 protobuf 编码解码往返。Windows 额外验证 console stdin 命令和
+protoc+pb 的 protobuf 编码解码往返。还有一项 redislib 冒烟测试，同样在 Skynet
+服务内跑 53 个命令的回复形状与 Redis 原文错误文本、`PFSELFTEST`、HLL 稀疏↔稠密往返、
+有序集合的两种内部编码、以 Redis GEO 文档数值为准的地理距离与跨 180° 经线行为、
+`dump()`/`load()` 字节互通、包装层的大写别名与表形态入参，以及 1e6 元素规模下的
+rank/range/LIMIT 精确断言；Windows 实测整套 2.3 秒，`--no-redislib` 时该项打印跳过
+说明并通过。Windows 额外验证 console stdin 命令和
 wepoll 65535-socket 容量；Linux 运行同一套运行时与退出测试。选择 `uring` 时还会验证
 TCP 和 UDP 回环往返，覆盖 accept/connect/recv/send/recvmsg/sendmsg 的完成事件路径，
 并验证 8192 个 UDP socket 的并发注册。Linux 如需把容量回归提高到 65535，可设置
@@ -179,5 +206,11 @@ TCP 和 UDP 回环往返，覆盖 accept/connect/recv/send/recvmsg/sendmsg 的�
   socket 使用 multishot accept，大于等于 64 KiB 的 TCP 写入使用 send zerocopy；两者在
   内核不支持时分别自动退回普通 io_uring accept/send。这保持了 Skynet 的消息顺序与关闭
   语义；read 的 multishot、buffer selection 和注册缓冲区等更激进的内核特性尚未启用。
+- redislib 移植的是 Redis 的**数据结构与算法**，不是它的服务器：没有 keyspace、
+  DB、TTL、主从复制与 AOF，因此也没有 `SCAN`/`ZSCAN` 与阻塞族
+  （`BZPOPMIN`/`BZPOPMAX`/`BZMPOP`）；对象是 Lua handle，命令打在 handle 上。
+  `dump()`/`load()` 中只有 bitmap 与 hll 的字节等于真 Redis 的 `GET`/`SET` 值，
+  sortedset 与 geo 用的是本项目 §4 定义的非 RDB 小端格式。逐条偏差见
+  `redislib-src/NOTICE` 第 6 节。
 - 上游最新代码将来如果改变被补丁覆盖的上下文，构建会立即失败并提示补丁未应用，
   需要同步更新本仓库兼容层。
