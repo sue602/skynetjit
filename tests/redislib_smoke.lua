@@ -1017,12 +1017,156 @@ local function test_dump()
 end
 
 
+local function test_wrapper()
+	local bitmap = require "bitmap"
+	local hll = require "hll"
+	local sortedset = require "sortedset"
+	local geo = require "geo"
+
+	-- The wrapper's promise (spec §3.1): every Redis command name works in its
+	-- uppercase form and reaches the SAME function, so both shapes cannot differ
+	-- in a reply or an error. Checked structurally for every command instead of
+	-- spot-checking a few, and the command count is pinned to spec §3.3 so a name
+	-- that loses its alias -- or turns up without one -- fails here.
+	local NOT_COMMAND = { new = true, load = true, dump = true, free = true,
+	                      len = true }
+	local function commands(t)
+		local seen, names = {}, {}
+		for name, f in pairs(t) do
+			if type(f) == "function" and not NOT_COMMAND[name] and
+				name:sub(1, 2) ~= "__" then
+				-- the aliases are in the same table, so the count is of distinct
+				-- commands, not of fields
+				local key = name:lower()
+				if not seen[key] then
+					seen[key] = true
+					names[#names+1] = key
+				end
+			end
+		end
+		table.sort(names)
+		return names
+	end
+	local function check_aliases(mod, expected)
+		local seen, n = {}, 0
+		local class = getmetatable(mod.new())
+		for _, t in ipairs({ class, mod }) do
+			for _, name in ipairs(commands(t)) do
+				assert(t[name:upper()] == t[name],
+					"alias missing or not identical: " .. name:upper())
+				if not seen[name] then seen[name] = true; n = n + 1 end
+			end
+		end
+		assert(n == expected, "command count " .. n .. ", expected " .. expected)
+		-- the library's own API is deliberately not a Redis command name
+		assert(class.DUMP == nil and class.NEW == nil, "dump/new must stay lowercase")
+	end
+	check_aliases(bitmap, 7)          -- SETBIT GETBIT BITCOUNT BITPOS BITOP
+	                                  -- BITFIELD BITFIELD_RO
+	check_aliases(hll, 5)             -- PFADD PFCOUNT PFMERGE PFDEBUG PFSELFTEST
+	check_aliases(sortedset, 31)
+	check_aliases(geo, 10)
+
+	-- upper case reaches the same behaviour, not just the same function
+	local b = bitmap.new()
+	assert(b:SETBIT(7, 1) == 0 and b:getbit(7) == 1)
+	assert(b:BITCOUNT() == 1)
+	assert(b:GETBIT(7) == 1)
+	local empty = bitmap.new()
+	assert(bitmap.BITOP("or", { b, empty }):getbit(7) == 1)
+	assert(b:BITFIELD("get", "u8", 0)[1] == 1)   -- bit 7 is byte 0's low bit
+
+	local a = hll.new()
+	assert(a:PFADD("x", "y") == 1)
+	assert(a:PFADD("x") == 0)
+	assert(hll.PFCOUNT(a) == 2)
+	assert(a:PFDEBUG("encoding") == "sparse")
+
+	local z = sortedset.new()
+	assert(z:ZADD(1, "a", 2, "b", 3, "c") == 3)
+	assert(z:ZCARD() == 3)
+	assert(z:ZSCORE("b") == 2)
+	local flat = z:zrange(0, -1, "withscores")
+	assert(#flat == 6 and flat[5] == "c" and flat[6] == 3)
+
+	local g = geo.new()
+	assert(g:GEOADD(15.087269, 37.502669, "Catania") == 1)
+	assert(g:GEODIST("Catania", "Catania") == 0)
+
+	-- ---- table form of ZADD's pairs (spec §3.1's dual-form input) ---------
+	local p1 = sortedset.new(); p1:zadd(1, "a", 2, "b")
+	local p2 = sortedset.new(); p2:zadd({ {1, "a"}, {2, "b"} })
+	assert(p2:dump() == p1:dump())
+	local p3 = sortedset.new(); p3:zadd({ {3, "c"} })
+	assert(p3:zscore("c") == 3)
+	-- option words keep their place in front of the flattened pairs
+	assert(p2:zadd("nx", { {9, "a"}, {9, "d"} }) == 1)
+	assert(p2:zscore("d") == 9 and p2:zscore("a") == 1)
+	assert(errtext(function() p2:zadd({ {1} }) end) ==
+		"zadd element 1 must be {score, member}")
+	assert(errtext(function() p2:zadd({ {1, "a"} }, 2) end) ==
+		"zadd takes the options before the element list")
+	assert(errtext(function() p2:zadd({ {1, "a"} }, { {2, "b"} }) end) ==
+		"zadd accepts one element list")
+
+	-- ---- options table and the pairs sugar -------------------------------
+	local q = sortedset.new(); q:zadd(1, "a", 2, "b", 3, "c")
+	local w = q:zrange(0, -1, {withscores = true})
+	assert(#w == 6 and w[1] == "a" and w[2] == 1)
+	for i = 1, #flat do assert(w[i] == flat[i]) end   -- same reply, both shapes
+	local rec = q:zrange(0, -1, {withscores = true, pairs = true})
+	assert(#rec == 3 and rec[1].member == "a" and rec[1].score == 1 and
+		rec[3].member == "c" and rec[3].score == 3)
+	-- the table shape and the word shape are the same call to the same parser,
+	-- including when the parser refuses something. With BYSCORE REV the bounds are
+	-- given as [max,min] (Redis' own `ZRANGE k +inf -inf BYSCORE REV` form), walked
+	-- from the top: c(3), b(2).
+	assert(q:zrange(3, 1, {byscore = true, rev = true, limit = {0, 2}}) [1] == "c")
+	assert(q:zrange(3, 1, "byscore", "rev", "limit", 0, 2) [1] == "c")
+	assert(errtext(function() q:zrange(0, -1, {withscores = true, bylex = true}) end) ==
+		"ERR syntax error, WITHSCORES not supported in combination with BYLEX")
+	assert(errtext(function() q:zrangebyscore(1, 3, {limit = {0}}) end) ==
+		"zrangebyscore: limit must be {offset, count}")
+	assert(errtext(function() q:zrange(0, -1, {bogus = true}) end) ==
+		"zrange: unknown option bogus")
+	assert(errtext(function() q:zrange(0, -1, {pairs = true}) end) ==
+		"zrange: pairs needs withscores")
+
+	-- ZRANGESTORE has the same options in both of its shapes
+	local s2 = sortedset.new()
+	local n1 = s2:zrangestore(q, 1, 3, {byscore = true, limit = {0, 2}})
+	local s3 = sortedset.new()
+	local n2 = s3:zrangestore(q, 1, 3, "byscore", "limit", 0, 2)
+	assert(n1 == n2 and s2:dump() == s3:dump())
+	local s4 = sortedset.new()
+	assert(sortedset.zrangestore(s4, q, 1, 3, {byscore = true}) == 3)
+	local s5 = sortedset.new()
+	assert(s5:zrangestore(q, 1, 3, "byscore") == 3 and s4:dump() == s5:dump())
+	-- an ordinary call with no options table is untouched
+	assert(q:zrange(0, -1) [2] == "b" and q:zcard() == 3)
+
+	-- ---- table form of GEOADD's triples ----------------------------------
+	local t1 = geo.new(); t1:geoadd(15.087269, 37.502669, "Catania")
+	local t2 = geo.new(); t2:geoadd({ {15.087269, 37.502669, "Catania"} })
+	assert(t2:dump() == t1:dump())
+	assert(math.abs(t2:geopos("Catania")[1][2] - 37.502669) < 1e-6)
+	local t3 = geo.new()
+	assert(t3:geoadd("nx", { {13.361389, 38.115556, "Palermo"},
+	                         {15.087269, 37.502669, "Catania"} }) == 2)
+	assert(errtext(function() t3:geoadd({ {1, 2} }) end) ==
+		"geoadd element 1 must be {longitude, latitude, member}")
+	assert(errtext(function() t3:geoadd({ {1, 2, "a"} }, 3) end) ==
+		"geoadd takes the options before the element list")
+end
+
+
 local tests = {
 	{ "bitmap", test_bitmap },
 	{ "hll", test_hll },
 	{ "sortedset", test_sortedset },
 	{ "geo", test_geo },
 	{ "dump", test_dump },
+	{ "wrapper", test_wrapper },
 }
 
 local function run()

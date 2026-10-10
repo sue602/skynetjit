@@ -505,6 +505,13 @@ Scores are Lua numbers in both directions (spec §3.1's type principle); on the
 wire Redis sends a double as a bulk string, so `tools/redis-diff` compares them
 numerically.
 
+Sorted set, in the wrapper: the `BYSCORE REV` case takes its bounds as
+[max,min] because that is what upstream does -- `zrangeGenericCommand()` swaps
+the two argument indexes whenever REV is combined with BYSCORE or BYLEX, which
+is why Redis' own documented form is `ZRANGE key +inf -inf BYSCORE REV`. A test
+written as `zrange(1, 3, "byscore", "rev")` gets an empty reply here *and* on a
+real server.
+
 Geo: `GEOADD` reads CH itself (upstream leaves CH to the `zaddCommand()` it
 re-dispatches to, and there is no re-dispatch here); the option words are still
 accepted in the same positions, and the reply rule is upstream's -- `CH` makes
@@ -590,3 +597,10 @@ pristine tree (allowing for the `\r\n` that the `shared.*` error objects carry),
 and the 2 remaining ones are the sentences above. The PFCOUNT arity message goes
 through `'%s' command` with the name passed as an argument for exactly that
 reason: no facade literal is a paraphrase of a Redis message.
+
+The Lua wrappers (Task 7) raise their own texts on purpose, before anything
+reaches C: `zadd element 1 must be {score, member}`, `geoadd takes the options
+before the element list`, `zrange: unknown option bogus`. Those are complaints
+about the *table shapes* spec §3.1 introduced, which Redis has no syntax for and
+therefore no message for; a Redis-format failure still comes out of the C layer
+with the text above.

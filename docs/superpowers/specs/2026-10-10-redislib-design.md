@@ -107,13 +107,16 @@ tools/redis-diff/             # 差分对测 harness（§6.2）
 - 参数约定：与 Redis 命令逐位对应；多 key 命令（PFMERGE、ZUNION…）接受多个
   同型对象句柄。`GEORADIUS ... STORE <key>` → `store = <geo对象>` 具名参数。
 - 输入双形态（Lua 包装层归一化，C 层只实现变参一种）：
-  `zs:add(1, "a", 2, "b")` 与 `zs:add({ {1,"a"}, {2,"b"} })` 等价。
+  `zs:zadd(1, "a", 2, "b")` 与 `zs:zadd({ {1,"a"}, {2,"b"} })` 等价。
+  （方法名按 §3.3 的规则就是 Redis 命令名小写，`add` 那写法是本节早前的笔误，
+  不另立第二个名字。）
 
 ### 3.2 返回值映射（写死并测）
 - 结构原则（已确认）：**按 RESP 回包结构忠实映射**，不自创结构——业务在
   "本地库 ↔ 真 Redis 客户端"间切换零改动，§6.2 差分对测为逐字段相等。
-  `sortedset.lua` 包装层可选提供 `pairs = true` 语法糖（返回
-  `{{member=..., score=...}, ...}`），纯 Lua 实现，不影响 C 层忠实性。
+  `sortedset.lua` 包装层提供 `pairs = true` 语法糖（返回
+  `{{member=..., score=...}, ...}`，须与 `withscores=true` 同用），纯 Lua 实现，
+  不影响 C 层忠实性：默认形状仍是下面这张表的平铺数组。
 | Redis 回复 | Lua |
 |---|---|
 | 整数 | number |
