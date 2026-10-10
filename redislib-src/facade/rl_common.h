@@ -29,9 +29,17 @@ typedef struct rl_object {
                      * carries its 16 byte "HYLL" header, exactly like a real
                      * Redis string object, so hllCount()/hllAdd() can be handed
                      * (struct hllhdr *)s->ptr directly. */
-    zset *zs;       /* zset / geo. A GEO value IS a sorted set, like in Redis:
-                     * the member is the member as the caller wrote it and the
-                     * score is the 52 bit geohash (geohashAlign52Bits). */
+    robj *zobj;     /* zset / geo: the kernel's own object view (encoding +
+                     * payload), created through zsetTypeCreate()/
+                     * createZsetObject()/createZsetListpackObject() and freed by
+                     * rl_free_ud(). Every t_zset.c entry point takes a robj*,
+                     * and the payload is a zset* only for the skiplist encoding
+                     * and a listpack for the other one, so the facade cannot
+                     * hold a zset* here -- Task 4 amended this member (it
+                     * replaced the earlier `zset *zs`).
+                     * A GEO value IS a sorted set, like in Redis: the member is
+                     * the member as the caller wrote it and the score is the 52
+                     * bit geohash (geohashAlign52Bits). */
     lua_State *L;   /* owning state, for __gc and for error messages */
 } rl_object;
 
@@ -41,20 +49,36 @@ typedef struct rl_object {
 rl_object *rl_check(lua_State *L, int idx, rl_kind kind);
 
 /* __gc entry: releases whatever the kind owns (sdsfree for str, the skiplist +
- * dict or listpack for zs) through the same allocator the kernel used. */
+ * dict or listpack for zobj) through the same allocator the kernel used. */
 void rl_free_ud(lua_State *L, void *p);
+
+/* Release one kernel zset object -- object.c's freeSortedSet() for the two
+ * encodings a redislib zset ever reaches. rl_free_ud() calls it for the
+ * RL_ZSET / RL_GEO arm, and a facade that swaps the payload of a live object
+ * (ZRANGESTORE) calls it directly, without going through the __gc marking. */
+void rl_free_zset(robj *zobj);
 
 /* RESP reply pushers, one per Redis reply shape (spec §3.2). They keep the
  * mapping table in one place so every command file reads the same way:
  *   rl_pushnilreply -> false        (Redis nil reply, "no such key/bit")
  *   rl_pushok       -> "OK"         (simple status string)
  *   rl_pushint      -> integer
+ *   rl_pushdouble   -> number       (Redis addReplyDouble; see below)
  *   rl_pushbool     -> 1 / 0        (Redis "integer reply used as boolean")
  */
 void rl_pushnilreply(lua_State *L);
 void rl_pushok(lua_State *L);
 void rl_pushint(lua_State *L, long long v);
 void rl_pushbool(lua_State *L, int v);
+
+/* addReplyDouble() puts the human-readable form of the double into a bulk
+ * string, because that is what a wire protocol needs. Scores are numbers on
+ * both sides of this API (ZADD takes them as numbers), and a Lua number IS the
+ * double, so the reply is pushed as a number: no formatting round trip, no
+ * precision loss, no tonumber() at every call site. Spec §3.1's "Lua native
+ * types only" is what this choice follows; tools/redis-diff (Task 10) compares
+ * the two sides numerically. */
+void rl_pushdouble(lua_State *L, double v);
 
 /* Create the per-kind metatable ("redis.bitmap" & friends), install the
  * command methods and __gc, leaving the metatable on the stack for the

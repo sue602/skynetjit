@@ -171,6 +171,32 @@ void *dictSdsDup(dict *d, const void *key) {
     return sdsdup((const sds) key);
 }
 
+/* src/server.c:690 -- verbatim. ZRANDMEMBER's CASE 4 staging dict owns the
+ * copies of the sampled members, so both destructors are the sds ones. */
+dictType hashDictType = {
+    dictSdsHash,                /* hash function */
+    NULL,                       /* key dup */
+    NULL,                       /* val dup */
+    dictSdsKeyCompare,          /* key compare */
+    dictSdsDestructor,          /* key destructor */
+    dictSdsDestructor,          /* val destructor */
+    NULL,                       /* allow to expand */
+};
+
+/* src/server.c:700 -- verbatim. ZRANDMEMBER's CASE 3 staging dict hands its
+ * keys straight to the reply, so it must not free them itself; the facade that
+ * uses it here keeps them alive until it has pushed each one to Lua and frees
+ * them itself (see facade/sortedset.c). */
+dictType sdsReplyDictType = {
+    dictSdsHash,                /* hash function */
+    NULL,                       /* key dup */
+    NULL,                       /* val dup */
+    dictSdsKeyCompare,          /* key compare */
+    NULL,                       /* key destructor */
+    NULL,                       /* val destructor */
+    NULL                        /* allow to expand */
+};
+
 REDISLIB_NORETURN void redislib_panic(const char *msg, ...) {
     va_list ap;
     va_start(ap, msg);

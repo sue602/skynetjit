@@ -25,6 +25,22 @@ rl_object *rl_check(lua_State *L, int idx, rl_kind kind) {
     return o;
 }
 
+void rl_free_zset(robj *zobj) {
+    /* object.c's freeSortedSet() for the two encodings a redislib zset reaches.
+     * The skiplist owns the element strings, the dict does not; a listpack
+     * zset has no dict at all. */
+    if (zobj == NULL) return;
+    if (zobj->encoding == OBJ_ENCODING_LISTPACK) {
+        lpFree(zobj->ptr);
+    } else {
+        zset *zs = zobj->ptr;
+        dictRelease(zs->dict);
+        zslFree(zs->zsl);
+        zfree(zs);
+    }
+    zfree(zobj);
+}
+
 void rl_free_ud(lua_State *L, void *p) {
     rl_object *o = (rl_object *)p;
     (void)L;
@@ -36,10 +52,8 @@ void rl_free_ud(lua_State *L, void *p) {
         break;
     case RL_ZSET:
     case RL_GEO:
-        /* zset release is contributed with the sortedset facade (Task 4);
-         * a GC can only run after an object was created, and creation for
-         * these kinds comes with that task, so this arm is unreachable for
-         * bitmap/hll modules built before it. */
+        rl_free_zset(o->zobj);
+        o->zobj = NULL;
         break;
     }
     o->kind = (rl_kind)-1;
@@ -55,6 +69,10 @@ void rl_pushok(lua_State *L) {
 
 void rl_pushint(lua_State *L, long long v) {
     lua_pushinteger(L, (lua_Integer)v);
+}
+
+void rl_pushdouble(lua_State *L, double v) {
+    lua_pushnumber(L, (lua_Number)v);
 }
 
 void rl_pushbool(lua_State *L, int v) {

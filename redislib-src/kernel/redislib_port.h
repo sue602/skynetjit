@@ -215,6 +215,12 @@ int dictSdsKeyCompare(dictCmpCache *cache, const void *key1, const void *key2);
 void dictSdsDestructor(dict *d, void *val);
 void *dictSdsDup(dict *d, const void *key);
 
+/* src/server.c:690 and :700: the two dictTypes the ZRANDMEMBER sampling
+ * strategies need (they live in the server core upstream, so a facade cannot
+ * see them). Both are the upstream definitions, verbatim. */
+extern dictType hashDictType;
+extern dictType sdsReplyDictType;
+
 /* ---------------------------------------------------------------------------
  * Redis configuration globals the kernels read. Defaults are the ones from
  * src/config.c createXXXConfig() lines, so behaviour matches a stock Redis.

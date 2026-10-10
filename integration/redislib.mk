@@ -73,7 +73,7 @@ $(LUA_CLIB_DIR)/redis/%.so: $(RL_FACADE)/%.c $(RL_OBJ_DIR)/rl_common.o $(RL_KOBJ
 
 # LUA_CLIB entries are appended by the facade tasks themselves, one per module
 # as it becomes available:
-LUA_CLIB += redis/bitmap redis/hll
+LUA_CLIB += redis/bitmap redis/hll redis/sortedset
 #   LUA_CLIB += redis/hll        (Task 3)
 #   LUA_CLIB += redis/sortedset  (Task 4)
 #   LUA_CLIB += redis/geo        (Task 5)

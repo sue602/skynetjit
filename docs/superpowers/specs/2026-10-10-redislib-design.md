@@ -118,6 +118,7 @@ tools/redis-diff/             # 差分对测 harness（§6.2）
 |---|---|
 | 整数 | number |
 | 状态文本 ("OK"/"QUEUED") | 字符串 `"OK"` |
+| 双精度数 (addReplyDouble：ZSCORE/ZINCRBY/GEODIST/WITHSCORES) | number |
 | Bulk 可能是 nil | string 或 `false` |
 | 数组 | table（保序保嵌套；`WITHSCORES` 为平铺数组 `[m1,s1,m2,s2...]`） |
 | Error | `lua_error`（消息文本同 Redis） |
@@ -137,12 +138,15 @@ tools/redis-diff/             # 差分对测 harness（§6.2）
 - **hll (5)**：pfadd pfcount(单/多对象) pfmerge pfdebug(8.10.0 实际共 5 子命令：
   `simd on|off` / `getreg` / `decode` / `encoding` / `todense`，已对照源码
   pfdebugCommand 核实；`simd` 在本库按编译目标固定报告 on/off) pfselftest
-- **sortedset (29)**：zadd(NX XX GT LT CH INCR) zcard zcount zdiff zdiffstore
+- **sortedset (31)**：zadd(NX XX GT LT CH INCR) zcard zcount zdiff zdiffstore
   zincrby zinter zintercard zinterstore zlexcount zmpop(COUNT/MIN|MAX，无 BLOCK)
-  zmscore zpopmax zpopmin zrandmember(COUNT WITHSCORES) zrange(BYINDEX/BYSCORE/
-  BYLEX/BYRANK/REV/LIMIT/WITHSCORES/SCORES 全过滤器) zrangebylex zrangebyscore
-  zrangestore zrank zrem zremrangebylex zremrangebyrank zremrangebyscore
+  zmscore zpopmax zpopmin zrandmember(COUNT WITHSCORES) zrange(BYSCORE/BYLEX/
+  REV/LIMIT offset count/WITHSCORES——8.10.0 的 ZRANGE 只有这一套过滤器，
+  **没有** 9.x 的 BYRANK/BYINDEX 与 ZMIN/ZMAX 形态，已按本源码树核实)
+  zrangebylex zrangebyscore
+  zrangestore zrank(WITHSCORE) zrem zremrangebylex zremrangebyrank zremrangebyscore
   zrevrange zrevrangebylex zrevrangebyscore zrevrank zscore zunion zunionstore
+  （计数说明：Redis 的 32 个 Z* 命令去掉 ZSCAN 正好 31 个。）
 
 **明确不提供**：ZSCAN/SCAN 游标类（库内对象全量即得）、BLOCK 家族、
 keyspace/DB、RESP 协议、RDB、cluster。文档里逐条列出，避免误用。

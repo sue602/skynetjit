@@ -129,10 +129,13 @@ Not from Redis (authored for this port):
     redislib-src/kernel/redislib_port.c      shim, section 4
     redislib-src/kernel/t_zset.h             types/API block out of server.h
     redislib-src/facade/hll_int.h            verbatim copy, section 3.1
+    redislib-src/facade/zset_int.h           verbatim copy, section 3.2
     redislib-src/facade/rl_common.{c,h}      the Lua-side object model
     redislib-src/facade/bitmap.c             the redis.bitmap command facade
     redislib-src/facade/hll.c                the redis.hll command facade
-    redislib-src/lua/{bitmap,hll}.lua        require shims for the business names
+    redislib-src/facade/sortedset.c          the redis.sortedset command facade
+    redislib-src/lua/{bitmap,hll,sortedset}.lua  require shims for the business
+                                             names
     tools/redislib-harness.c                 Task 1 self check, never shipped
     tools/run-harness-wsl.sh                 harness regression runner
 
@@ -162,6 +165,38 @@ paths).
 
 Same technique, earlier: `kernel/t_zset.h` is the sorted-set/skiplist type and
 API block lifted verbatim out of `server.h` (see section 3).
+
+3.2 Verbatim copy #2 -- facade/zset_int.h
+-----------------------------------------
+
+`facade/zset_int.h` -- `$RSRC/src/t_zset.c:1950-2014` (the `zsetopsrc` and
+`zsetopval` iterator types with their `iterset` / `iterzset` unions) and
+`:2301-2334` (`REDIS_AGGR_SUM|MIN|MAX|COUNT`, `zuiWeightedScore()`,
+`zunionInterAggregate()`), copied from this port's own `kernel/t_zset.c`, where
+those lines are byte-identical to `$RSRC`. Both ranges were re-extracted by
+script and compared back: 65 + 34 lines, no difference.
+
+Why: ZUNION / ZINTER / ZDIFF iterate their operands through the `zui*()` API,
+which takes those two types, and they aggregate through those two functions. All
+of it is file-scope in t_zset.c (upstream declares the types and the
+`REDIS_AGGR_*` macros in server.h, which is not part of this port), so a facade
+cannot reach them.
+
+Deliberately NOT copied: the ZDIFF algorithm block (`zdiffAlgorithm1/2`,
+`zsetChooseDiffAlgorithm`, `zdiff`) and the `zsetRemoveFromSkiplist()` it calls.
+That chain reaches the file-local skiplist internals (`zslDelete()` and its
+helpers), and copying those would move the skiplist itself into the facade.
+`facade/sortedset.c` runs upstream's algorithm 2 -- stage the first operand,
+delete every later operand's members, insert what survives -- against the
+exported `dict*()` / `zslInsert()` API instead. The result set is the same; the
+heuristic that picks between upstream's two algorithms is not ported because the
+facade only implements the one.
+
+Also authored for the port, in the facade layer: `rl_common.{c,h}` (the object
+model and the RESP->Lua reply helpers, including `rl_pushdouble()` and
+`rl_free_zset()` contributed by Task 4) and the four command facades. Their
+reply-mapping and no-keyspace deviations are marked `rl:` at the site of each
+one, and section 6 lists them per command family.
 
 Files the brief listed that are NOT in `kernel/`: none. Files beyond the brief's
 list: `endianconv.c`, `monotonic.c`, `mt19937-64.{c,h}`, `sha256.{c,h}`,
@@ -286,6 +321,16 @@ path no redislib facade can reach.
     dictSdsDestructor  server.c:398
     dictSdsDup         server.c:418
 
+`redislib_port.c` -- dictType *objects* from src/server.c, needed by the
+    facades (the kernels themselves never install them):
+    hashDictType       server.c:689   (ZRANDMEMBER CASE 4 staging dict, which
+                                       owns copies of the sampled members)
+    sdsReplyDictType   server.c:700   (ZRANDMEMBER CASE 3 and the ZUNION / ZDIFF
+                                       staging dicts in facade/sortedset.c;
+                                       neither destructor is set, so the facade
+                                       frees each key once it has handed its
+                                       bytes to Lua)
+
 `redislib_port.c` -- abort stubs (deliberate, they must never run):
     setTypeSize(), setTypeIsMemberAux()   src/t_set.c
         Only the t_zset.c zunion/zdiff helper block reaches them, and only when a
@@ -378,3 +423,56 @@ Two more warning classes are suppressed for the kernel objects only, by
               command layer deleted by edit B, e.g. hyperloglog.c's
               invalid_hll_err (the facades re-declare the text).
 
+
+Sorted-set specific verification (Task 4): all 31 commands of spec §3.3 run in
+`tests/redislib_smoke.lua`, on both encodings (the facade switches to the
+skiplist past `zset_max_listpack_entries` on its own, and the test asserts both
+branches). The performance self check of the plan is a soft indicator, recorded
+here rather than asserted, because it is machine dependent: MinGW-w64 build,
+1e6 `zadd` + `zrange(0,100)` + a full WITHSCORES scan = 1.27 s total (the plan's
+limit was 10 s), `zcount`/`zrank` over 1e6 elements are sub-millisecond (they
+take the O(log N) `zslNthInRange()` path, as Redis does), and
+`zremrangebyscore()` over 500k elements is 0.23 s.
+
+6. Deviations from a live Redis, by command family
+---------------------------------------------------
+
+Every one of these is also marked `rl:` at its site in the facade source. They
+are the complete list of places where a redislib command cannot be byte-for-byte
+the same program as the Redis command, and they are what a reviewer should
+compare against `$RSRC` instead of expecting equality.
+
+Object model (all families): there is no keyspace, no client, no DB and no
+protocol. A command's key argument becomes the handle the method is called on,
+`addReply*` becomes the Lua reply (spec §3.2), `server.dirty` /
+`notifyKeyspaceEvent` / AOF-and-replica propagation are absent, and an object
+that empties out stays addressable instead of being deleted (so `zcard()` after
+`zrem()`-ing everything replies 0 where a live server replies 0 for a missing
+key too, and `zadd()` after that starts from empty in both).
+
+Bitmap: none beyond the object model. BITFIELD's offset cap is Redis' own
+`proto-max-bulk-len` default (512MB), taken as a constant because there is no
+config to read.
+
+HyperLogLog: PFDEBUG SIMD has no runtime switch (this build defines neither
+HAVE_AVX2 nor HAVE_AARCH64_NEON), so it always answers "disabled", which is what
+a scalar Redis build answers; and a bad ON/OFF argument raises instead of
+replying the error and then the status the way upstream's fall-through does,
+because one Lua call returns one value. PFCOUNT's cached-cardinality write-back
+does not mark anything dirty. `createHLLObject()`'s robj is a view the facade
+discards; kernel calls that may replace `o->ptr` are handed a stack robj and the
+sds is written back after every call.
+
+Sorted set: range bounds are parsed by the facade with the same
+`fast_float_strtod()` + rejection rules as the file-local `zslParseRange()`
+(which is why a score of "1e400" is refused while a bound of "1e400" is not --
+upstream uses `string2d()` for scores and `fast_float_strtod()` for bounds);
+range *deletion* walks the range and calls `zsetDel()` per member instead of the
+file-local `zsl/zzlDeleteRangeBy*()` helpers, so it is O(M log N) rather than
+O(M + log N) on a skiplist; ZDIFF has only upstream's algorithm 2, not the
+1-versus-2 cost heuristic; ZMPOP's reply carries the source handle where Redis
+carries the key name, and ZUNION/ZINTER/ZDIFF/ZINTERCARD take their key list as
+one array table (Redis' `numkeys` integer has nothing to count here).
+Scores are Lua numbers in both directions (spec §3.1's type principle); on the
+wire Redis sends a double as a bulk string, so `tools/redis-diff` compares them
+numerically.
