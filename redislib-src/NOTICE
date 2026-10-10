@@ -192,8 +192,10 @@ path no redislib facade can reach.
     `(long)` -> `(uintptr_t)` (util.c:975). `long` is 32-bit on Windows, so the
     original truncates the pointer; the xor-fed seed value is otherwise
     unchanged, and on POSIX `long` == `intptr_t` width so behaviour there is
-    bit-identical. No other line in any ported file differs from upstream
-    beyond the three mechanical edit types.
+    bit-identical. A second portability edit guards sha256.h's `typedef
+    uint32_t WORD` with `#ifndef _WINDEF_` (MinGW's windows.h, pulled in via
+    sys headers, declares the same-named typedef). No other line in any ported
+    file differs from upstream beyond the three mechanical edit types.
 
 `redislib_port.h` -- types:
     struct robj { unsigned type:4; unsigned encoding:4; void *ptr; }

@@ -55,7 +55,10 @@ NB_RPATH :=
 include $(INTEGRATION_DIR)/integration/netbull.mk
 
 # redislib kernels are plain C: BASE_CFLAGS plus the win32 compat force-include.
-RL_CFLAGS := $(BASE_CFLAGS) $(WIN_FORCE)
+# The redislib kernel/facade TUs must not see compat.h's force-include: it
+# pulls windows.h, whose WORD typedef collides with Redis' sha256.h WORD.
+# (Verified: kernel objects compile standalone against MinGW.)
+RL_CFLAGS := $(BASE_CFLAGS)
 include $(INTEGRATION_DIR)/integration/redislib.mk
 
 .PHONY: all core modules tools clean print-config

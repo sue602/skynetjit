@@ -1,5 +1,5 @@
 /* rl_common.h -- skynetjit redislib: the facade object model and the RESP-style
- * reply helpers shared by every luaclib/redis/* module.
+ * reply helpers shared by every luaclib/redis module.
  *
  * This header is the Task 1 contract (docs/superpowers/plans/2026-10-10-redislib.md,
  * "公共约定：facade 对象模型"): the signatures below are what bitmap.c / geo.c /
@@ -55,5 +55,15 @@ void rl_pushnilreply(lua_State *L);
 void rl_pushok(lua_State *L);
 void rl_pushint(lua_State *L, long long v);
 void rl_pushbool(lua_State *L, int v);
+
+/* Create the per-kind metatable ("redis.bitmap" & friends), install the
+ * command methods and __gc, leaving the metatable on the stack for the
+ * caller to attach anything else it needs. */
+void rl_register_class(lua_State *L, rl_kind kind,
+                       const luaL_Reg *methods, lua_CFunction gcfn);
+
+/* Push a fresh zeroed rl_object userdata of the given kind with the class
+ * metatable attached. */
+void rl_newobject(lua_State *L, rl_kind kind);
 
 #endif /* REDISLIB_RL_COMMON_H */

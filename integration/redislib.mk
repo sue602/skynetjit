@@ -34,22 +34,29 @@ $(RL_OBJ_DIR)/%.o: $(RL_KERNEL)/%.c | $(OBJ_DIR)
 	mkdir -p $(dir $@)
 	$(CC) $(RL_CFLAGS) -c $< -o $@
 
+# rl_common.c is the shared facade object (lua headers come from RL_CFLAGS via
+# BASE_CFLAGS); give it its own rule so it does not fall into the kernel one.
+$(RL_OBJ_DIR)/rl_common.o: $(RL_FACADE)/rl_common.c | $(OBJ_DIR)
+	mkdir -p $(dir $@)
+	$(CC) $(RL_CFLAGS) -I$(RL_KERNEL) -I$(RL_FACADE) -c $< -o $@
+
 # Facade modules land in the redis/ sub namespace: luaclib/redis/{bitmap,geo,
 # hll,sortedset}.so, required as "redis.bitmap" and friends (same precedent as
 # NetBull's luaclib/skiplist/c.so).
 $(LUA_CLIB_DIR)/redis:
 	mkdir -p $@
 
-$(LUA_CLIB_DIR)/redis/%.so: $(RL_FACADE)/%.c $(RL_KOBJS) \
+$(LUA_CLIB_DIR)/redis/%.so: $(RL_FACADE)/%.c $(RL_OBJ_DIR)/rl_common.o $(RL_KOBJS) \
 	| $(LUA_CLIB_DIR) $(LUA_CLIB_DIR)/redis $(NB_SKYNET_DEP)
-	$(CC) $(RL_CFLAGS) $(SHARED) -I$(RL_FACADE) -o $@ $< $(RL_KOBJS) \
+	$(CC) $(RL_CFLAGS) $(SHARED) -I$(RL_KERNEL) -I$(RL_FACADE) -o $@ $< \
+		$(RL_OBJ_DIR)/rl_common.o $(RL_KOBJS) \
 		$(SKYNET_LINK) $(LUA_LIBS) $(SYSTEM_LIBS) $(NB_RPATH)
 
 # LUA_CLIB entries are appended by the facade tasks themselves, one per module
-# as it becomes available -- Task 1 adds none of them:
-#   LUA_CLIB += redis/bitmap
-#   LUA_CLIB += redis/hll
-#   LUA_CLIB += redis/sortedset
-#   LUA_CLIB += redis/geo
+# as it becomes available:
+LUA_CLIB += redis/bitmap
+#   LUA_CLIB += redis/hll        (Task 3)
+#   LUA_CLIB += redis/sortedset  (Task 4)
+#   LUA_CLIB += redis/geo        (Task 5)
 
 endif
