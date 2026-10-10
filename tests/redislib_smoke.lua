@@ -1160,6 +1160,55 @@ local function test_wrapper()
 end
 
 
+local function test_scale()
+	local sortedset = require "sortedset"
+
+	-- spec §6.1's last bullet: correctness at 1e6 elements (it sets no time
+	-- budget; the measured cost is recorded in NOTICE §5). Everything here is an
+	-- exact value, not a "does not crash" check, and it goes through the
+	-- listpack -> skiplist conversion, the rank paths and the range walkers.
+	local N = 1000000
+	local z = sortedset.new()
+	for i = 1, N do assert(z:zadd(i, "m" .. i) == 1) end
+	assert(z:zcard() == N)
+	assert(z:zscore("m1") == 1 and z:zscore("m" .. N) == N)
+	assert(z:zrank("m" .. N) == N - 1 and z:zrevrank("m" .. N) == 0)
+	assert(z:zcount(1, N) == N and z:zcount("(1", "(3") == 1)
+	assert(z:zscore("m" .. (N / 2)) == N / 2)
+
+	-- O(log N) entry into a range plus the LIMIT walk, at both ends
+	local head = z:zrange(0, 999)
+	assert(#head == 1000 and head[1] == "m1" and head[1000] == "m1000")
+	local tail = z:zrange(-1000, -1, "withscores")
+	assert(#tail == 2000 and tail[1] == "m" .. (N - 999) and tail[2] == N - 999)
+	assert(tail[1999] == "m" .. N and tail[2000] == N)
+	local mid = z:zrangebyscore(N / 2, N / 2 + 99, "withscores")
+	assert(#mid == 200 and mid[1] == "m" .. (N / 2) and mid[2] == N / 2)
+	assert(#z:zrange(1, N, "byscore", "limit", N / 2, 500) == 500)
+
+	-- the pairs sugar over a large slice
+	local rec = z:zrange(0, 999, {withscores = true, pairs = true})
+	assert(#rec == 1000 and rec[1000].member == "m1000" and rec[1000].score == 1000)
+
+	-- a slice of a big set dumps and reloads byte-identically
+	local part = sortedset.new()
+	for i = 1, 1000 do part:zadd(i * 7, "p" .. i) end
+	local blob = part:dump()
+	local back = sortedset.load(blob)
+	assert(back:dump() == blob and back:zcard() == 1000)
+
+	-- removal by score across the top half, then the ranks have to still line up
+	assert(z:zremrangebyscore(N / 2 + 1, "+inf") == N / 2)
+	assert(z:zcard() == N / 2)
+	assert(z:zrevrange(0, 0) [1] == "m" .. (N / 2))
+	assert(z:zrank("m1") == 0 and z:zrevrank("m1") == N / 2 - 1)
+	assert(#z:zrangebyscore(1, 3, "withscores") == 6)
+	-- the whole remaining set is exactly the first half, in order
+	assert(#z:zrange(0, N / 2 - 1) == N / 2)
+	assert(z:zrange(N / 2 - 1, N / 2 - 1) [1] == "m" .. (N / 2))
+end
+
+
 local tests = {
 	{ "bitmap", test_bitmap },
 	{ "hll", test_hll },
@@ -1167,6 +1216,7 @@ local tests = {
 	{ "geo", test_geo },
 	{ "dump", test_dump },
 	{ "wrapper", test_wrapper },
+	{ "scale", test_scale },
 }
 
 local function run()

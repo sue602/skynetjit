@@ -75,6 +75,16 @@ if [ -f luaclib/cjson.so ] && [ -f luaclib/luacurl.so ] && [ -f luaclib/skiplist
 else
 	echo "NetBull luaclib set not built; skipping its smoke test."
 fi
+if [ -f luaclib/redis/bitmap.so ] && [ -f luaclib/redis/hll.so ] &&
+   [ -f luaclib/redis/sortedset.so ] && [ -f luaclib/redis/geo.so ]; then
+	echo "Running redislib smoke test..."
+	rm -f redislib-smoke.ok
+	run_skynet_exit_test "$TEST_DIR/redislib-config.lua" redislib-smoke.log
+	test -f redislib-smoke.ok
+	grep -q "redislib-smoke: redislib modules succeeded" redislib-smoke.log
+else
+	echo "redislib set not built; skipping its smoke test."
+fi
 if [ "$BACKEND" = uring ]; then
 	grep -q "io_uring completion backend enabled" runtime-smoke.log
 	echo "Running completion-driven io_uring TCP and UDP round-trip tests..."

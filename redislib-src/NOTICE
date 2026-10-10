@@ -462,6 +462,18 @@ limit was 10 s), `zcount`/`zrank` over 1e6 elements are sub-millisecond (they
 take the O(log N) `zslNthInRange()` path, as Redis does), and
 `zremrangebyscore()` over 500k elements is 0.23 s.
 
+The suite is part of the project's one-shot runtime test since Task 8:
+`scripts/test-runtime.sh` runs `tests/redislib-config.lua` when
+`luaclib/redis/{bitmap,hll,sortedset,geo}.so` are all present and prints
+`redislib set not built; skipping its smoke test.` otherwise -- the same shape the
+NetBull clibs section uses, so `--no-redislib` builds stay green without it. Its
+seven families (bitmap, hll, sortedset, geo, dump, wrapper, scale) run in 2.3 s on
+the MinGW-w64 build, which is why the 1e6-element family is in the default test
+rather than a manual probe: spec §6.1 asks for correctness at that size, and every
+assertion in `test_scale()` is an exact value (rank, count, slice contents, a
+LIMIT walk, the pairs sugar, and a deletion after which the ranks still line up),
+not a "does not crash" check.
+
 6. Deviations from a live Redis, by command family
 ---------------------------------------------------
 
