@@ -241,6 +241,19 @@ long redislib_random(void);
 void redislib_srandom(unsigned int seed);
 #define random() redislib_random()
 #define srandom(s) redislib_srandom(s)
+
+/* util.c's directory/file helpers (dirCreateIfMissing, dirRemove, the
+ * redis_fsync call sites in anonTry/*) are dead code for redislib: no facade
+ * and no kernel entry point performs filesystem I/O. These mappings exist
+ * purely so the verbatim kernel files compile with MinGW-w64, whose io.h
+ * declares 1-arg _mkdir, has no O_NONBLOCK and names fsync _commit.
+ * Range/semantic differences vs POSIX are therefore unreachable. */
+#include <direct.h>   /* _mkdir on MinGW-w64 */
+#define mkdir(path, mode) _mkdir(path)
+#ifndef O_NONBLOCK
+#define O_NONBLOCK 0
+#endif
+#define fsync _commit
 #endif
 
 /* Sorted-set / skiplist types and kernel API, extracted verbatim from

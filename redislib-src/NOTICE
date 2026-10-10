@@ -179,6 +179,21 @@ path no redislib facade can reach.
                                              only for skiplist levels and dict
                                              sampling, so a xorshift64* with the
                                              same [0, RAND_MAX] contract is used)
+    mkdir(p,m) / O_NONBLOCK / fsync(fd)   -> _mkdir(p) / 0 / _commit(fd),
+                                             only under `#if defined(_WIN32)`
+                                             (the sole call sites are util.c's
+                                             dirCreateIfMissing / dirRemove /
+                                             redis_fsync users — filesystem
+                                             helpers no redislib facade reaches;
+                                             mapped so the verbatim kernels
+                                             compile on MinGW-w64)
+    One further edit inside a kernel file, for LLP64 portability (MinGW build
+    error): util.c getRandomBytes() fallback reseed line casts the FILE* `fp`
+    `(long)` -> `(uintptr_t)` (util.c:975). `long` is 32-bit on Windows, so the
+    original truncates the pointer; the xor-fed seed value is otherwise
+    unchanged, and on POSIX `long` == `intptr_t` width so behaviour there is
+    bit-identical. No other line in any ported file differs from upstream
+    beyond the three mechanical edit types.
 
 `redislib_port.h` -- types:
     struct robj { unsigned type:4; unsigned encoding:4; void *ptr; }
