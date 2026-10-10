@@ -862,11 +862,167 @@ local function test_geo()
 	collectgarbage("collect")
 end
 
+local function test_dump()
+	local bitmap = require "bitmap"
+	local hll = require "hll"
+	local sortedset = require "sortedset"
+	local geo = require "geo"
+
+	-- spec §4's blob for the sorted-set family: uint32 count, then count records
+	-- of float64 score + uint32 member length + that many member bytes, every
+	-- integer little-endian. Read and written here with byte arithmetic only --
+	-- no packing library -- which is what "another language can parse it" means.
+	local function u32(s, i)
+		return s:byte(i) + s:byte(i+1)*256 + s:byte(i+2)*65536 + s:byte(i+3)*16777216
+	end
+	local function blob_member(s, want)
+		local off, n = 5, u32(s, 1)
+		for i = 1, n do
+			local mlen = u32(s, off+8)
+			if i == want then return s:sub(off+12, off+12+mlen-1) end
+			off = off + 12 + mlen
+		end
+		return nil
+	end
+
+	-- ---- bitmap: the dump IS the Redis string value -----------------------
+	local b = bitmap.new()
+	assert(b:dump() == "")                       -- never touched: the empty string
+	assert(bitmap.load(""):len() == 0)
+	b:setbit(1000, 1)
+	local bb = b:dump()
+	-- bit 1000 is byte 125 (0-based), and Redis numbers bits from the most
+	-- significant one, so it is that byte's 0x80.
+	assert(#bb == 126 and bb:byte(126) == 128)
+	local b2 = bitmap.load(bb)
+	assert(b2:getbit(1000) == 1 and b2:len() == 126)
+	assert(b2:dump() == bb)                      -- load(dump) is byte-identity
+	local b3 = bitmap.load("\0\1\0\2")           -- a NUL is data, not an end
+	assert(b3:len() == 4 and b3:getbit(0) == 0 and b3:getbit(15) == 1)
+	assert(b3:dump() == "\0\1\0\2")
+	assert(errtext(function() bitmap.load(5) end) == "ERR string expected, got number")
+
+	-- ---- hll: the same bytes GET returns, with Redis' own read-in checks ---
+	local a = hll.new()
+	a:pfadd("k1", "k2")
+	local hb = a:dump()
+	assert(hb:sub(1, 4) == "HYLL")
+	assert(hb:byte(5) == 1)                      -- HLL_SPARSE for two elements
+	assert(#hb < 100)
+	local h2 = hll.load(hb)
+	assert(h2:dump() == hb)                      -- load is byte-identity
+	assert(h2:pfcount() == 2)
+	-- PFCOUNT caches its estimate in the value, the way the server does (it is
+	-- what makes a repeat PFCOUNT cheap), so the bytes move here -- and the two
+	-- sketches then agree byte for byte.
+	assert(a:pfcount() == 2 and h2:dump() ~= hb and h2:dump() == a:dump())
+	h2:pfadd("k3")                               -- a loaded sketch keeps working
+	assert(h2:pfcount() == 3)
+
+	local big = hll.new()
+	for i = 1, 5000 do big:pfadd("e" .. i) end
+	local gb = big:dump()
+	assert(gb:byte(5) == 0)                      -- HLL_DENSE
+	assert(#gb == 12304)                         -- HLL_HDR_SIZE + 16384*6/8
+	assert(hll.load(gb):pfcount() == big:pfcount())
+
+	-- A blob that is not an HLL is refused with the text every HLL command uses.
+	assert(errtext(function() hll.load("not an hll at all") end) ==
+		"WRONGTYPE Key is not a valid HyperLogLog string value.")
+	assert(errtext(function() hll.load(hb:sub(1, 15)) end) ==
+		"WRONGTYPE Key is not a valid HyperLogLog string value.")
+	assert(errtext(function() hll.load(hb:sub(1, 3) .. "X" .. hb:sub(5)) end) ==
+		"WRONGTYPE Key is not a valid HyperLogLog string value.")
+	assert(errtext(function() hll.load(
+		string.char(72, 89, 76, 76, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)) end) ==
+		"WRONGTYPE Key is not a valid HyperLogLog string value.")
+	assert(errtext(function() hll.load(gb:sub(1, 64)) end) ==
+		"WRONGTYPE Key is not a valid HyperLogLog string value.")
+
+	-- ---- sortedset: the bytes are exactly the documented layout -----------
+	local z = sortedset.new()
+	z:zadd(1.5, "a")
+	local zb = z:dump()
+	assert(#zb == 4 + 12 + 1)
+	assert(zb:sub(1, 4) == string.char(1, 0, 0, 0))
+	assert(zb:sub(5, 12) == string.char(0, 0, 0, 0, 0, 0, 0xF8, 0x3F))  -- 1.5
+	assert(zb:sub(13, 16) == string.char(1, 0, 0, 0))
+	assert(zb:sub(17) == "a")
+
+	local o = sortedset.new()
+	o:zadd(3, "c", 1, "a", 2, "b")
+	local ob = o:dump()
+	assert(u32(ob, 1) == 3)
+	-- records come out in score order, so one set always writes one blob
+	assert(blob_member(ob, 1) == "a" and blob_member(ob, 2) == "b" and
+		blob_member(ob, 3) == "c")
+	-- a foreign writer that follows spec §4 produces exactly these bytes
+	local handmade = string.char(3, 0, 0, 0) ..
+		string.char(0, 0, 0, 0, 0, 0, 0xF0, 0x3F) .. string.char(1, 0, 0, 0) .. "a" ..
+		string.char(0, 0, 0, 0, 0, 0, 0x00, 0x40) .. string.char(1, 0, 0, 0) .. "b" ..
+		string.char(0, 0, 0, 0, 0, 0, 0x08, 0x40) .. string.char(1, 0, 0, 0) .. "c"
+	assert(handmade == ob)
+	local hz = sortedset.load(handmade)
+	assert(hz:zcard() == 3 and hz:zscore("b") == 2 and hz:zrange(0, -1) [3] == "c")
+
+	-- binary members survive, and so does an empty set
+	local bin = sortedset.new()
+	bin:zadd(7, "\0\1\255")
+	assert(sortedset.load(bin:dump()):zscore("\0\1\255") == 7)
+	assert(sortedset.new():dump() == string.char(0, 0, 0, 0))
+	assert(sortedset.load(string.char(0, 0, 0, 0)):zcard() == 0)
+
+	-- +inf is a legal score (ZADD accepts it); a NaN is not a number and would
+	-- leave the skiplist unordered, so a blob carrying one is refused.
+	local inf = string.char(1, 0, 0, 0,
+		0, 0, 0, 0, 0, 0, 0xF0, 0x7F, 1, 0, 0, 0, string.byte("x"))
+	assert(sortedset.load(inf):zscore("x") == math.huge)
+	local nan = string.char(1, 0, 0, 0,
+		0, 0, 0, 0, 0, 0, 0xF8, 0x7F, 1, 0, 0, 0, string.byte("x"))
+	assert(errtext(function() sortedset.load(nan) end) == "ERR Bad data format")
+
+	for _, bad in ipairs({
+		ob:sub(1, #ob - 1),                    -- truncated member
+		ob .. "x",                             -- trailing bytes
+		string.char(2, 0, 0, 0) .. ob:sub(5),  -- count above the records present
+		string.char(1, 0, 0, 0, 0, 0, 0),      -- header plus a partial record
+		string.char(255, 255, 255, 255),       -- a count no blob could carry
+		"",                                    -- nothing at all
+	}) do
+		assert(errtext(function() sortedset.load(bad) end) == "ERR Bad data format")
+	end
+	assert(errtext(function() sortedset.load({}) end) == "ERR string expected, got table")
+
+	-- ---- geo: a geoset is a sorted set, so the blob is interchangeable ----
+	local g = geo.new()
+	g:geoadd(116.4898586, 39.9167148, "SF")
+	g:geoadd(116.481028, 39.9148707, "PJ")
+	local gb2 = g:dump()
+	local g2 = geo.load(gb2)
+	assert(g2:geodist("SF", "PJ") == g:geodist("SF", "PJ"))
+	assert(math.abs(g2:geopos("SF")[1][1] - 116.4898586) < 1e-6)
+	assert(math.abs(g2:geopos("PJ")[1][2] - 39.9148707) < 1e-6)
+	assert(g2:dump() == gb2)
+	-- the scores are the 52-bit geohashes: a plain zset reads the same blob and
+	-- sees integers, which is how GEOADD / ZADD would restore it on a real server
+	local asz = sortedset.load(gb2)
+	local sf = asz:zscore("SF")
+	assert(sf == math.floor(sf) and sf > 0 and asz:zcard() == 2)
+	-- and the other way round: a geoset built from a sorted set's blob decodes
+	-- those scores as positions again (GEOHASH replies one 11-character string
+	-- per member asked for, so the array has one entry and the entry has 11).
+	local g3 = geo.load(asz:dump())
+	assert(math.abs(g3:geopos("SF")[1][1] - 116.4898586) < 1e-6)
+	assert(#g3:geohash("SF") == 1 and #g3:geohash("SF")[1] == 11)
+end
+
+
 local tests = {
 	{ "bitmap", test_bitmap },
 	{ "hll", test_hll },
 	{ "sortedset", test_sortedset },
 	{ "geo", test_geo },
+	{ "dump", test_dump },
 }
 
 local function run()

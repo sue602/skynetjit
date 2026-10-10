@@ -711,11 +711,38 @@ lbitmap_free(lua_State *L) {
     return 0;
 }
 
+/* ---- dump / load (spec §4, not Redis commands) --------------------------
+ *
+ * A bitmap IS a Redis string, so its dump is that string: byte for byte what
+ * GET of such a key returns, and load is what SET does with it. Any bytes are a
+ * valid string, so there is nothing to reject -- which is also why a blob from
+ * a real Redis (SET k <the same bytes>) and one made here are the same thing. */
+static int
+lbitmap_dump(lua_State *L) {
+    rl_object *o = rl_check(L, 1, RL_BITMAP);
+
+    rl_pushvalue(L, o);
+    return 1;
+}
+
+/* bitmap.load(string) => bitmap */
+static int
+lbitmap_load(lua_State *L) {
+    rl_object *o;
+    size_t len;
+    const char *buf = rl_checkblob(L, 1, &len);
+
+    rl_newobject(L, RL_BITMAP);
+    o = (rl_object*)lua_touserdata(L, -1);
+    o->str = sdsnewlen(buf, len);
+    return 1;
+}
+
 /* __tostring: the raw Redis string value (may contain NUL bytes). */
 static int
 lbitmap_tostring(lua_State *L) {
     rl_object *o = rl_check(L, 1, RL_BITMAP);
-    lua_pushlstring(L, o->str ? (char*)o->str : "", sdslen(o->str));
+    rl_pushvalue(L, o);
     return 1;
 }
 
@@ -727,12 +754,14 @@ static const luaL_Reg bitmap_methods[] = {
     {"bitfield", lbitmap_bitfield},
     {"bitfield_ro", lbitmap_bitfield_ro},
     {"len", lbitmap_len},
+    {"dump", lbitmap_dump},
     {"free", lbitmap_free},
     {NULL, NULL},
 };
 
 static const luaL_Reg bitmap_module_methods[] = {
     {"new", lbitmap_new},
+    {"load", lbitmap_load},
     {"bitop", lbitmap_bitop},
     {NULL, NULL},
 };

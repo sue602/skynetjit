@@ -34,8 +34,6 @@
  * them in server.h, which is not part of this port). Same rule NOTICE §4
  * records for bitmap.c and hll.c: declare what you call, next to the kernel
  * file you mirror. */
-robj *zsetTypeCreate(size_t size_hint, size_t val_len_hint);
-void zsetTypeMaybeConvert(robj *zobj, size_t size_hint);
 zskiplistNode *zslGetElementByRank(zskiplist *zsl, unsigned long rank);
 void zsetTypeRandomElement(robj *zsetobj, unsigned long zsetsize,
                            listpackEntry *key, double *score);
@@ -119,6 +117,35 @@ lzset_free(lua_State *L) {
     rl_object *o = rl_check(L, 1, RL_ZSET);
     rl_free_ud(L, o);
     return 0;
+}
+
+/* ---- dump / load (spec §4, not Redis commands) -------------------------- */
+
+/* zobj:dump() => string */
+static int
+lzset_dump(lua_State *L) {
+    rl_object *o = rl_check(L, 1, RL_ZSET);
+    sds blob = rl_dump_zset(o->zobj);
+
+    lua_pushlstring(L, blob, sdslen(blob));
+    sdsfree(blob);
+    return 1;
+}
+
+/* sortedset.load(string) => zset */
+static int
+lzset_load(lua_State *L) {
+    rl_object *o;
+    size_t len;
+    const char *buf = rl_checkblob(L, 1, &len);
+
+    /* The handle is pushed before the payload is parsed so that a raise in
+     * rl_load_zset() leaves an empty, collectible object rather than an
+     * allocated set nobody points at. */
+    rl_newobject(L, RL_ZSET);
+    o = (rl_object*)lua_touserdata(L, -1);
+    o->zobj = rl_load_zset(L, buf, len);
+    return 1;
 }
 
 /* ---- ZADD / ZINCRBY ----------------------------------------------------- */
@@ -1272,37 +1299,6 @@ rl_pushlpentry(lua_State *L, listpackEntry *ele) {
     }
 }
 
-/* Walk every (member, score) pair of a zset in ascending order.
- * rl: upstream iterates through the zui* machinery of t_zset.c, which is built
- * on the zsetopsrc / zsetopval typedefs that live inside that file. The two
- * places a facade walk is needed here want only the pair, so each encoding is
- * walked directly instead of copying those types into a facade header. */
-static void
-rl_zset_walk_all(robj *zobj, void (*emit)(void *arg, sds ele, double score),
-                 void *arg) {
-    if (zobj->encoding == OBJ_ENCODING_LISTPACK) {
-        unsigned char *zl = zobj->ptr;
-        unsigned char *eptr = lpSeek(zl, 0), *sptr;
-
-        while (eptr) {
-            sptr = lpNext(zl, eptr);
-            {
-                sds ele = lpGetObject(eptr);
-                emit(arg, ele, zzlGetScore(sptr));
-                sdsfree(ele);
-            }
-            zzlNext(zl, &eptr, &sptr);
-        }
-    } else {
-        zskiplistNode *ln = ((zset*)zobj->ptr)->zsl->header->level[0].forward;
-
-        while (ln) {
-            emit(arg, zslGetNodeElement(ln), ln->score);
-            ln = ln->level[0].forward;
-        }
-    }
-}
-
 /* zrandmemberWithCountCommand()'s strategy thresholds -- t_zset.c:4498, :4503. */
 #define RL_ZRAND_SUB_STRATEGY_MUL 3
 #define RL_ZRAND_RANDOM_SAMPLE_LIMIT 1000
@@ -1466,7 +1462,7 @@ lzrandmember(lua_State *L) {
 
     if (count >= size) {
         /* rl: the walk pushes as it goes, so no iterator type is copied. */
-        rl_zset_walk_all(zsetobj, rl_rand_walk_push, &out);
+        rl_zset_walk(zsetobj, rl_rand_walk_push, &out);
         lua_pushvalue(L, out.tab);
         return 1;
     }
@@ -1502,7 +1498,7 @@ lzrandmember(lua_State *L) {
         dictExpand(d, size);
         staging.d = d;
         /* rl: same walk as CASE 2, but the pairs land in the staging dict. */
-        rl_zset_walk_all(zsetobj, rl_rand_dict_add, &staging);
+        rl_zset_walk(zsetobj, rl_rand_dict_add, &staging);
         serverAssert(dictSize(d) == size);
 
         /* Remove random elements to reach the right count. */
@@ -1967,12 +1963,14 @@ static const luaL_Reg zset_methods[] = {
     {"zunionstore", lzunionstore},
     {"zinterstore", lzinterstore},
     {"zdiffstore", lzdiffstore},
+    {"dump", lzset_dump},
     {"free", lzset_free},
     {NULL, NULL},
 };
 
 static const luaL_Reg zset_module_methods[] = {
     {"new", lzset_new},
+    {"load", lzset_load},
     {"zrangestore", lzrangestore},
     {"zmpop", lzmpop},
     {"zunion", lzunion},

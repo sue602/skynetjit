@@ -136,6 +136,157 @@ void rl_object_set_zset(rl_object *dst, robj *fresh) {
     dst->zobj = fresh;
 }
 
+/* ---- the sorted-set family blob (spec §4) ------------------------------- */
+
+void rl_zset_walk(robj *zobj, void (*emit)(void *arg, sds ele, double score),
+                  void *arg) {
+    if (zobj->encoding == OBJ_ENCODING_LISTPACK) {
+        unsigned char *zl = zobj->ptr;
+        unsigned char *eptr = lpSeek(zl, 0), *sptr;
+
+        while (eptr) {
+            sptr = lpNext(zl, eptr);
+            {
+                sds ele = lpGetObject(eptr);
+                emit(arg, ele, zzlGetScore(sptr));
+                sdsfree(ele);
+            }
+            zzlNext(zl, &eptr, &sptr);
+        }
+    } else {
+        zskiplistNode *ln = ((zset*)zobj->ptr)->zsl->header->level[0].forward;
+
+        while (ln) {
+            emit(arg, zslGetNodeElement(ln), ln->score);
+            ln = ln->level[0].forward;
+        }
+    }
+}
+
+/* The blob's integers are little-endian by construction, written and read with
+ * shifts rather than a cast, so neither byte order nor alignment is assumed. */
+static void
+rl_wr32(unsigned char *p, uint32_t v) {
+    p[0] = v & 0xff; p[1] = (v >> 8) & 0xff;
+    p[2] = (v >> 16) & 0xff; p[3] = (v >> 24) & 0xff;
+}
+
+static void
+rl_wr64(unsigned char *p, uint64_t v) {
+    int i;
+
+    for (i = 0; i < 8; i++) p[i] = (v >> (i*8)) & 0xff;
+}
+
+static uint32_t
+rl_rd32(const unsigned char *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static uint64_t
+rl_rd64(const unsigned char *p) {
+    uint64_t v = 0;
+    int i;
+
+    for (i = 7; i >= 0; i--) v = (v << 8) | p[i];
+    return v;
+}
+
+typedef struct {
+    sds *out;
+    unsigned char hdr[12];
+} rl_dump_emit;
+
+static void
+rl_dump_append(void *arg, sds ele, double score) {
+    rl_dump_emit *st = arg;
+    uint64_t bits;
+
+    memcpy(&bits, &score, sizeof(bits));
+    rl_wr64(st->hdr, bits);
+    rl_wr32(st->hdr+8, (uint32_t)sdslen(ele));
+    *st->out = sdscatlen(*st->out, st->hdr, sizeof(st->hdr));
+    *st->out = sdscatlen(*st->out, ele, sdslen(ele));
+}
+
+sds rl_dump_zset(robj *zobj) {
+    rl_dump_emit st;
+    unsigned char count[4];
+    sds out = sdsempty();
+
+    st.out = &out;                /* the emit callback moves it as it appends */
+    rl_wr32(count, (uint32_t)zsetLength(zobj));
+    out = sdscatlen(out, count, sizeof(count));
+    rl_zset_walk(zobj, rl_dump_append, &st);
+    return out;
+}
+
+robj *rl_load_zset(lua_State *L, const char *buf, size_t len) {
+    const unsigned char *p = (const unsigned char*)buf;
+    const unsigned char *end = p + len;
+    robj *zobj = NULL;
+    uint32_t count, i;
+
+    if (len < 4) goto bad;
+    count = rl_rd32(p);
+    p += 4;
+
+    /* Every record takes at least its 12 header bytes, so a count larger than
+     * that is already a bad blob. Checked before the object is created because
+     * the object sizes its dictionary from this number -- without the check a
+     * four-byte "count 4294967295" would ask for a 4G-bucket dict. */
+    if (count > (uint32_t)((len - 4) / 12)) goto bad;
+
+    /* The size hint is exact here, which is what a ZADD of this many elements
+     * would hand zsetTypeCreate(). */
+    zobj = zsetTypeCreate(count, 0);
+    for (i = 0; i < count; i++) {
+        uint64_t bits;
+        uint32_t mlen;
+        double score;
+        sds ele;
+        int out_flags = 0;
+        double out_score = 0;
+
+        if ((size_t)(end - p) < 12) goto bad;
+        bits = rl_rd64(p);
+        memcpy(&score, &bits, sizeof(score));
+        p += 8;
+        mlen = rl_rd32(p);
+        p += 4;
+        if ((size_t)(end - p) < mlen) goto bad;
+        ele = sdsnewlen(p, mlen);
+        p += mlen;
+        /* zsetAdd() refuses NaN itself (t_zset.c:4267, the same rule that makes
+         * ZADD reject it), so a blob carrying one is not a set we can hand
+         * back: its skiplist ordering would be undefined. */
+        if (!zsetAdd(zobj, score, ele, ZADD_IN_NONE, &out_flags, &out_score)) {
+            sdsfree(ele);
+            goto bad;
+        }
+        sdsfree(ele);                /* the set owns its copy */
+    }
+    if (p != end) goto bad;           /* trailing bytes */
+    return zobj;
+
+bad:
+    /* rl: Redis' own text for a serialized payload it cannot parse (the reply
+     * for a bad RESTORE payload, cluster.c:290). `zobj` is NULL until the
+     * header checks pass, and is released here when it exists -- the handle the
+     * caller pushed is still empty, so the raise cannot leave a half-built set
+     * behind and the userdata's own __gc has nothing to double-free. */
+    if (zobj) rl_free_zset(zobj);
+    rl_error(L, "Bad data format");
+    return NULL;                      /* not reached */
+}
+
+const char *rl_checkblob(lua_State *L, int idx, size_t *len) {
+    if (lua_type(L, idx) != LUA_TSTRING)
+        rl_error(L, "string expected, got %s", lua_typename(L, lua_type(L, idx)));
+    return lua_tolstring(L, idx, len);
+}
+
 void rl_free_ud(lua_State *L, void *p) {
     rl_object *o = (rl_object *)p;
     (void)L;
@@ -172,6 +323,12 @@ void rl_pushdouble(lua_State *L, double v) {
 
 void rl_pushbool(lua_State *L, int v) {
     lua_pushinteger(L, v ? 1 : 0);
+}
+
+void rl_pushvalue(lua_State *L, rl_object *o) {
+    size_t n = o->str ? sdslen(o->str) : 0;
+
+    lua_pushlstring(L, o->str ? (char*)o->str : "", n);
 }
 
 static int rl_gc(lua_State *L) {

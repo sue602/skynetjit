@@ -24,10 +24,6 @@
 #include "geo_sem.h"
 #include "geo.h"
 
-/* Kernel entry points not covered by facade-side t_zset.h (see NOTICE §4). */
-robj *zsetTypeCreate(size_t size_hint, size_t val_len_hint);
-void zsetTypeMaybeConvert(robj *zobj, size_t size_hint);
-
 /* geo.c:506-514 */
 #define RL_SORT_NONE 0
 #define RL_SORT_ASC  1
@@ -57,6 +53,35 @@ lgeo_free(lua_State *L) {
     rl_object *o = rl_check(L, 1, RL_GEO);
     rl_free_ud(L, o);
     return 0;
+}
+
+/* ---- dump / load (spec §4, not Redis commands) --------------------------
+ *
+ * A geoset IS a sorted set, so its blob is the sorted set's: the members are
+ * the names and the records' scores are the 52-bit geohashes. A blob written
+ * here can therefore be replayed against a real server with GEOADD (or ZADD),
+ * which is spec §4's interop direction. */
+static int
+lgeo_dump(lua_State *L) {
+    rl_object *o = rl_check(L, 1, RL_GEO);
+    sds blob = rl_dump_zset(o->zobj);
+
+    lua_pushlstring(L, blob, sdslen(blob));
+    sdsfree(blob);
+    return 1;
+}
+
+/* geo.load(string) => geoset */
+static int
+lgeo_load(lua_State *L) {
+    rl_object *o;
+    size_t len;
+    const char *buf = rl_checkblob(L, 1, &len);
+
+    rl_newobject(L, RL_GEO);
+    o = (rl_object*)lua_touserdata(L, -1);
+    o->zobj = rl_load_zset(L, buf, len);
+    return 1;
 }
 
 /* The geoset of the object at idx. */
@@ -594,12 +619,14 @@ static const luaL_Reg geo_methods[] = {
     {"georadiusbymember_ro", lgeoradiusbymember_ro},
     {"geosearch", lgeosearch},
     {"geosearchstore", lgeosearchstore},
+    {"dump", lgeo_dump},
     {"free", lgeo_free},
     {NULL, NULL},
 };
 
 static const luaL_Reg geo_module_methods[] = {
     {"new", lgeo_new},
+    {"load", lgeo_load},
     {"geosearchstore", lgeosearchstore},
     {NULL, NULL},
 };

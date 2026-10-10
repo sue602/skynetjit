@@ -79,15 +79,11 @@ rl_checkhll(lua_State *L, rl_object *o) {
 }
 
 /* One PFADD element: the bytes of a Lua string (or of a number's decimal
- * form, which is what lua_tolstring() hands out).
- * rl: RESP bulk strings are always strings, so upstream has no equivalent for
- * a non-string argument; Lua's own type message is used instead of inventing
- * a Redis error text. */
+ * form, which is what lua_tolstring() hands out). Type rules are the shared
+ * member check's, including its Lua-side text. */
 static unsigned char *
 rl_element(lua_State *L, int idx, size_t *len) {
-    if (!lua_isstring(L, idx))
-        rl_error(L, "string or number expected, got %s",
-                   lua_typename(L, lua_type(L, idx)));
+    rl_checkmember(L, idx);
     return (unsigned char*)lua_tolstring(L, idx, len);
 }
 
@@ -594,18 +590,50 @@ lhll_free(lua_State *L) {
     return 0;
 }
 
+/* ---- dump / load (spec §4, not Redis commands) --------------------------
+ *
+ * An HLL IS a Redis string whose bytes are the sketch, so dump() is those
+ * bytes -- sparse or dense, as GET of such a key returns them -- and load() is
+ * SET plus the check every HLL command makes before touching the value
+ * (rl_checkhll(), the data side of isHLLObjectOrReply()). The object is built
+ * first and validated second, so a rejected blob leaves nothing but a
+ * collectible, still-empty handle. */
+static int
+lhll_dump(lua_State *L) {
+    rl_object *o = rl_check(L, 1, RL_HLL);
+
+    rl_pushvalue(L, o);
+    return 1;
+}
+
+/* hll.load(string) => hll */
+static int
+lhll_load(lua_State *L) {
+    rl_object *o;
+    size_t len;
+    const char *buf = rl_checkblob(L, 1, &len);
+
+    rl_newobject(L, RL_HLL);
+    o = (rl_object*)lua_touserdata(L, -1);
+    o->str = sdsnewlen(buf, len);
+    rl_checkhll(L, o);
+    return 1;
+}
+
 static const luaL_Reg hll_methods[] = {
     {"pfadd", lhll_pfadd},
     {"pfcount", lhll_pfcount},
     {"pfmerge", lhll_pfmerge},
     {"pfdebug", lhll_pfdebug},
     {"pfselftest", lhll_pfselftest},
+    {"dump", lhll_dump},
     {"free", lhll_free},
     {NULL, NULL},
 };
 
 static const luaL_Reg hll_module_methods[] = {
     {"new", lhll_new},
+    {"load", lhll_load},
     {"pfcount", lhll_pfcount},
     {"pfmerge", lhll_pfmerge},
     {"pfselftest", lhll_pfselftest},

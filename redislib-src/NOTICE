@@ -523,6 +523,30 @@ behaviour (the kernel is verbatim), not the port's, and the smoke test asserts
 it on purpose: a search from -180, and one from a member at -179.99, do find
 both sides.
 
+Dump and load (spec §4; not Redis commands, so this is the one place where a
+redislib value crosses a process boundary): a bitmap's or an HLL's `dump()` is
+the Redis *string value* itself -- byte for byte what `GET` of such a key
+returns, sparse or dense -- and `load()` is `SET` plus, for an HLL, the same
+read-in check every PF* command makes (`isHLLObjectOrReply()`'s data side, so a
+blob that is too short, mis-magicked, has an unknown encoding byte, or is dense
+with the wrong length gets `WRONGTYPE Key is not a valid HyperLogLog string
+value.`). Because PFCOUNT caches its estimate inside the value, as the server
+does, a `dump()` taken after a count differs by those 8 bytes from one taken
+before it -- the same two sketches converge once both have been counted, which
+the smoke test asserts. The sorted-set family uses the small non-RDB layout
+spec §4 defines (`uint32 count + (float64 score, uint32 len, bytes member)*`,
+integers written with shifts so the blob is little-endian on any host, records
+in ascending score order so one set always writes one blob). It is deliberately
+not Redis' DUMP format, which is RDB plus a CRC64 trailer and is not what "a
+skynet service can store this in any medium" needs; a blob is replayed against a
+real server with ZADD / GEOADD instead, and the smoke test hand-decodes one to
+prove no reader needs a Redis library. Loading validates the shape strictly --
+a count that cannot be filled from the remaining bytes is refused *before* the
+dictionary is sized from it, and trailing bytes, truncation, and a NaN score all
+raise `Bad data format`, upstream's own reply for a serialized payload it cannot
+parse (`cluster.c:290`). `+inf` and `-inf` are legal scores there because ZADD
+accepts them.
+
 7. Error replies: the code a client sees
 -----------------------------------------
 
@@ -553,14 +577,16 @@ it.
 
 Two texts are the facade's own, because Redis has no equivalent failure:
 `"string or number expected, got %s"` (a Lua argument can be a table or a
-handle, a RESP argument cannot) and the `luaL_checkstring()` "bad argument"
-message that option words produce when handed a non-string. Upstream cannot
-express either -- every element of `c->argv` is already a string there -- so
-these read as Lua errors with the generic code in front of them.
+handle, a RESP argument cannot), `"string expected, got %s"` (the same, for
+`load()`, where a number must not be coerced because the argument is a byte
+string), and the `luaL_checkstring()` "bad argument" message that option words
+produce when handed a non-string. Upstream cannot express any of them -- every
+element of `c->argv` is already a string there -- so these read as Lua errors
+with the generic code in front of them.
 
-That claim is checked, not asserted: a scan of the facades' 112 `rl_error(L,
-"...")` sites against `$RSRC` finds 110 whose literal appears verbatim in the
+That claim is checked, not asserted: a scan of the facades' 113 `rl_error(L,
+"...")` sites against `$RSRC` finds 111 whose literal appears verbatim in the
 pristine tree (allowing for the `\r\n` that the `shared.*` error objects carry),
-and the 2 remaining ones are the sentence above. The PFCOUNT arity message goes
+and the 2 remaining ones are the sentences above. The PFCOUNT arity message goes
 through `'%s' command` with the name passed as an argument for exactly that
 reason: no facade literal is a paraphrase of a Redis message.

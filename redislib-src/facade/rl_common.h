@@ -116,6 +116,42 @@ void rl_free_zset(robj *zobj);
  * `dst` must be RL_ZSET or RL_GEO; its kind is preserved. */
 void rl_object_set_zset(rl_object *dst, robj *fresh);
 
+/* The two create/convert entry points every sorted-set kind calls are declared
+ * here instead of per facade, because three files call them and only the
+ * linker would notice a signature that drifted. Upstream keeps them in
+ * server.h, which is not part of this port; t_zset.c:1413 and :1428 define
+ * them. */
+robj *zsetTypeCreate(size_t size_hint, size_t val_len_hint);
+void zsetTypeMaybeConvert(robj *zobj, size_t size_hint);
+
+/* ---- the portable blob of the sorted-set family (spec §4) ---------------
+ *
+ * rl_zset_walk() calls `emit` for every member in ascending score order for
+ * either encoding -- listpack entries and skiplist level-0 links are both kept
+ * in score order -- which is what makes dump() byte-stable for a given set.
+ *
+ * rl_dump_zset() returns spec §4's blob as a fresh sds the caller frees:
+ *   uint32 count, then count records of  float64 score, uint32 len, len bytes
+ * every integer little-endian and written by hand, so a blob written here is
+ * readable on any host and by any language (spec §4's "可跨语言解析").
+ *
+ * rl_load_zset() is the inverse and raises on anything that is not exactly that
+ * shape -- truncation, a member length running past the end, trailing bytes, a
+ * NaN score -- with upstream's own payload text, "Bad data format" (the reply
+ * Redis gives for a serialized value it cannot parse, cluster.c:290). The
+ * object is pre-sized with zsetTypeCreate(count), the same hint path a ZADD of
+ * that many elements takes, and every record goes in through zsetAdd(), so a
+ * loaded set is indistinguishable from one that was added to element by
+ * element, encoding conversions included. */
+void rl_zset_walk(robj *zobj, void (*emit)(void *arg, sds ele, double score),
+                  void *arg);
+sds rl_dump_zset(robj *zobj);
+robj *rl_load_zset(lua_State *L, const char *buf, size_t len);
+
+/* The argument of a load() function: a binary string, with no numeric coercion
+ * (a number would be a different blob than the bytes the caller meant). */
+const char *rl_checkblob(lua_State *L, int idx, size_t *len);
+
 /* RESP reply pushers, one per Redis reply shape (spec §3.2). They keep the
  * mapping table in one place so every command file reads the same way:
  *   rl_pushnilreply -> false        (Redis nil reply, "no such key/bit")
@@ -128,6 +164,13 @@ void rl_pushnilreply(lua_State *L);
 void rl_pushok(lua_State *L);
 void rl_pushint(lua_State *L, long long v);
 void rl_pushbool(lua_State *L, int v);
+
+/* Push the Redis string value a bitmap / HLL object holds, as Lua bytes (this
+ * is what spec §4's dump() is, and what a GET of such a key returns). An object
+ * that has not been given a value yet pushes the empty string, which is what a
+ * key set to "" reads as; sdslen() cannot be asked about NULL, so the length is
+ * taken from the same test as the pointer. */
+void rl_pushvalue(lua_State *L, rl_object *o);
 
 /* addReplyDouble() puts the human-readable form of the double into a bulk
  * string, because that is what a wire protocol needs. Scores are numbers on
