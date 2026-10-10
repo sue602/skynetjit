@@ -1,0 +1,288 @@
+redislib-src -- provenance, licensing and porting record
+=========================================================
+
+Source:   https://github.com/redis/redis
+Version:  Redis 8.10.0 (`src/version.h`: REDIS_VERSION "8.10.0",
+          REDIS_VERSION_NUM 0x00080a00)
+Snapshot: the unpacked release tree at `D:\download\redis-8.10.0` (referred to
+          below as `$RSRC`), i.e. the official 8.10.0 source distribution. The
+          upstream commit SHA of that archive was not recorded at copy time;
+          `version.h` pins the release.
+Purpose:  the algorithm kernels behind the skynetjit `luaclib/redis/*` modules
+          (bitmap / geo / hyperloglog / sortedset), extracted from Redis' own
+          implementation so that command semantics, encodings and return values
+          match a real Redis byte for byte.
+Contact:  this port is maintained inside this repository; see
+          docs/superpowers/plans/2026-10-10-redislib.md for the task-by-task
+          record and docs/superpowers/specs/2026-10-10-redislib-design.md for
+          the design.
+
+
+1. License
+----------
+
+Redis 8.x is triple licensed. From `$RSRC/LICENSE.txt` (lines 1-5):
+
+    Starting with Redis 8, Redis Open Source is moving to a tri-licensing model
+    with all new Redis code contributions governed by the updated Redis Software
+    Grant and Contributor License Agreement. After this release, contributions
+    are subject to your choice of: (a) the Redis Source Available License v2
+    (RSALv2); or (b) the Server Side Public License v1 (SSPLv1); or (c) the GNU
+    Affero General Public License v3 (AGPLv3).
+
+Every file under `redislib-src/kernel/` keeps its original Redis copyright head
+and its "Licensed under your choice of (a) ... (RSALv2); or (b) ... (SSPLv1); or
+(c) ... (AGPLv3)" paragraph. None of those headers were altered, and none may be
+removed.
+
+The binding restriction for this repository is RSALv2's "Limitations" clause
+(`$RSRC/LICENSE.txt`, lines 90-104):
+
+    You may not make the functionality of the Software or a Modified version
+    available to third parties as a service or distribute the Software or a
+    Modified version in a manner that makes the functionality of the Software
+    available to third parties.
+
+RULING ON RECORD (internal use only): the redislib modules are compiled into
+skynetjit as an in-process data-structure library used by our own services. They
+are not offered to third parties as a service, and skynetjit builds containing
+them are not distributed outside the company. Under that reading RSALv2 permits
+the use, which is why this port takes the RSALv2 branch of the tri-license and
+does not trigger SSPLv1/AGPLv3 network-copyleft obligations. If redislib ever
+becomes part of something shipped to, or hosted for, third parties, this ruling
+must be revisited before that happens -- the safest fallback is AGPLv3.
+
+Third-party notices preserved inside individual files: `siphash.c` (Public
+Domain / BSD0 by Jean-Philippe Aumassant and Vladimir Sapozhnikov, plus the
+reference test vectors), `fast_float_strtod.c` and `fpconv_*` (their own
+upstream headers), `crc16.c` and `listpack.c` (upstream author notices).
+
+
+2. Mechanical-edit policy
+-------------------------
+
+Only three kinds of edit are allowed to any file in `kernel/`, and no others:
+
+  (A) include replacement -- `#include "server.h"` / `"zmalloc.h"` /
+      `"redisassert.h"` / `"atomicvar.h"` / `"object.h"` become
+      `#include "redislib_port.h"`; the replacement is 1:1, so a file that
+      included three now-shimmed headers gets three `redislib_port.h` lines
+      (harmless, they are guarded, and it keeps the diff line-symmetric).
+  (B) command-layer removal -- deleting `*Command(client *c, ...)` functions and
+      the static helpers that only they called, plus the `client`/`obj` reply
+      plumbing those functions used. Nothing else may be deleted.
+  (C) one port-notice line added directly below the copyright block, reading
+      either "command layer removed", "include shim applied (redislib_port.h)",
+      or "copied verbatim from Redis 8.10.0", each ending with
+      "see redislib-src/NOTICE".
+
+Algorithm lines are never re-indented, rewritten, "improved" or reordered. This
+is machine-checked: `git diff` of any kernel file against the matching `$RSRC`
+file must show only (A), (B) and (C) shapes. As of Task 1 the audit produced
+zero non-mechanical added lines in all 40 ported files; removals are confined to
+`bitops.c` (1062 lines), `hyperloglog.c` (522) and `t_zset.c` (2302), which are
+the three files that carried command functions. Kept deliberately even though
+nothing calls them yet: the `zsl*` / `zzl*` skiplist and listpack API (the plan
+requires all of it) and `invalid_hll_err` in `hyperloglog.c` (its text is the
+PF* error message Task 3 must reproduce).
+
+`redislib_port.h`, `redislib_port.c` and `t_zset.h` are the only files not taken
+from Redis: the first two are the shim described in section 4, and `t_zset.h` is
+the sorted-set / skiplist type block plus the `zsl*`/`zzl*` prototypes copied out
+of `$RSRC/src/server.h` (which is not part of the port). `kernel/` holds 43 files
+in total: 20 `.c` plus 23 `.h`, of which 40 come from Redis.
+
+
+3. File map
+-----------
+
+`$RSRC/src/` -> `redislib-src/kernel/`, one file per line unless noted.
+
+Kernel files with the command layer removed (edit B):
+    bitops.c          SETBIT/GETBIT/BITCOUNT/BITPOS/BITOP/BITFIELD* command
+                      functions removed; popcount/bitpos/bitfield helpers kept
+    hyperloglog.c     PFADD/PFCOUNT/PFMERGE commands removed; hll* kept
+    t_zset.c          all Z*/ZRANGEBY* /ZUNION* command functions removed;
+                      zsl*/zzl*/zset* kept
+
+Files copied verbatim except for include lines (edit A + C):
+    adlist.c  crc16.c  dict.c  fast_float_strtod.c  intset.c  listpack.c
+    monotonic.c  sds.c  util.c
+    hyperloglog.h  listpack_malloc.h  sdsalloc.h
+        (listpack_malloc.h: `#include "zmalloc.h"` -> `#include "redislib_port.h"`)
+
+Files copied verbatim, no code change at all (edit C only):
+    endianconv.c  fpconv_dtoa.c  geohash.c  geohash_helper.c  mt19937-64.c
+    sha256.c  siphash.c
+    adlist.h  config.h  debugmacro.h  dict.h  endianconv.h  fast_float_strtod.h
+    fmacros.h  geohash.h  geohash_helper.h  intset.h  listpack.h  monotonic.h
+    mt19937-64.h  sds.h  sha256.h  util.h
+
+Different upstream directory:
+    $RSRC/deps/fpconv/fpconv_dtoa.c   -> kernel/fpconv_dtoa.c
+    $RSRC/deps/fpconv/fpconv_dtoa.h   -> kernel/fpconv_dtoa.h
+    $RSRC/deps/fpconv/fpconv_powers.h -> kernel/fpconv_powers.h
+
+Not from Redis (authored for this port):
+    redislib-src/kernel/redislib_port.h      shim, section 4
+    redislib-src/kernel/redislib_port.c      shim, section 4
+    redislib-src/kernel/t_zset.h             types/API block out of server.h
+    tools/redislib-harness.c                 Task 1 self check, never shipped
+    tools/run-harness-wsl.sh                 harness regression runner
+
+Files the brief listed that are NOT in `kernel/`: none. Files beyond the brief's
+list: `endianconv.c`, `monotonic.c`, `mt19937-64.{c,h}`, `sha256.{c,h}`,
+`fpconv_dtoa.{c,h}`, `fpconv_powers.h`, `hyperloglog.h`, `t_zset.h`, `config.h`,
+`fmacros.h`, `debugmacro.h`, `listpack.{c,h}`, `listpack_malloc.h` -- all of them
+are in the dependency closure of the required kernels: `util.c` needs
+fpconv/monotonic/sha256/endianconv, `dict.h:45` includes mt19937-64.h because
+`dict.h:242` defines `randomULong()` as `genrand64_int64()`, `sds.c` needs
+sdsalloc/config, `geohash_helper.c` needs debugmacro.h, `t_zset.c` needs listpack
+for the listpack encoding of a zset (added while finishing Task 1, so that the
+whole kernel -- including t_zset.c and bitops.c -- compiles and links), and the
+remaining `#include "config.h"` / `"fmacros.h"` lines are preserved by edit A.
+
+
+4. Shim 清单 (shim symbol list)
+-------------------------------
+
+Everything the ported kernels used to get from `server.h`, `zmalloc.h`,
+`redisassert.h`, `atomicvar.h` and `object.h`. Nothing here changes behaviour:
+each entry is either the upstream definition copied verbatim, a documented
+stand-in for server-core state the kernels only read, or an abort for a code
+path no redislib facade can reach.
+
+`redislib_port.h` -- macros:
+    zmalloc / zrealloc / zfree            -> skynet_malloc / skynet_realloc /
+                                             skynet_free (`skynet_malloc.h`)
+    serverAssert(_e)                      -> assert(_e)
+    serverAssertWithInfo(_c,_o,_e)        -> assert(_e)
+    serverPanic(...)                      -> redislib_panic(...)  [noreturn]
+    serverLog(...)                        -> no-op
+    debugAssert / debugServerAssert / debugServerAssertWithInfo -> no-op
+                                            (matches a non DEBUG_ASSERTIONS build)
+    REDISLIB_NORETURN                     -> __attribute__((noreturn)) /
+                                             __declspec(noreturn)
+    redisAtomic, atomicIncr, atomicIncrGet, atomicGetIncr, atomicDecr, atomicGet,
+    atomicSet, atomicGetWithSync, atomicSetWithSync
+                                          -> copied verbatim from the
+                                             "atomic-builtin" branch of
+                                             src/atomicvar.h
+    OBJ_STRING..OBJ_GCRA (9), OBJ_ENCODING_RAW..OBJ_ENCODING_SLICED_ARRAY (14)
+                                          -> values copied from server.h /
+                                             object.h
+    C_OK, C_ERR, min, max, UNUSED         -> server.h
+    ZSKIPLIST_MAXLEVEL, ZSKIPLIST_P, ZSKIPLIST_MAX_SEARCH -> server.h:656-658
+    random() / srandom()                  -> redislib_random/redislib_srandom,
+                                             only under `#if defined(_WIN32)`
+                                             (MSVCRT has neither; Redis uses them
+                                             only for skiplist levels and dict
+                                             sampling, so a xorshift64* with the
+                                             same [0, RAND_MAX] contract is used)
+
+`redislib_port.h` -- types:
+    struct robj { unsigned type:4; unsigned encoding:4; void *ptr; }
+                                          -> the three members the ported kernels
+                                             read; refcount/lru/metabits from
+                                             object.h:102 are intentionally not
+                                             ported because a redislib object is
+                                             owned by the facade that created it
+    redislibServerConfig  (extern `server`) -> hll_sparse_max_bytes 3000,
+                                               zset_max_listpack_entries 128,
+                                               zset_max_listpack_value 64,
+                                               memory_tracking_enabled 0;
+                                               defaults from src/config.c
+    redislibSharedStruct  (extern `shared`) -> minstring / maxstring sentinels
+                                               created by redislib_init(), the
+                                               zslParseLexRangeItem() unbounded
+                                               range edges
+
+`redislib_port.c` -- allocator wrappers (src/zmalloc.h API, skynet has no
+    calloc/usable-size variants):
+    zcalloc, ztrycalloc, ztrymalloc, ztryrealloc, zmalloc_usable, zcalloc_usable,
+    ztrymalloc_usable, ztrycalloc_usable, zrealloc_usable, ztryrealloc_usable,
+    zfree_usable, zfree_with_size, zmalloc_usable_size
+        (usable size is reported as the requested size: SDS then simply assumes no
+         slack and reallocs a little earlier -- no behaviour change)
+
+`redislib_port.c` -- object factories (copied verbatim from upstream, which is
+    server core rather than a kernel file):
+    createObject()            src/object.c:107  (no refcount/lru fields to set)
+    createZsetObject()        src/object.c:492
+    createZsetListpackObject() src/object.c:505
+    extern dictType zsetDictType  declared here, defined by the ported t_zset.c
+                              (upstream: server.h:3195)
+
+`redislib_port.c` -- dictType callbacks from src/server.c:
+    dictSdsHash        server.c:435
+    dictSdsCaseHash    server.c:439
+    dictSdsKeyCompare  server.c:370
+    dictSdsDestructor  server.c:398
+    dictSdsDup         server.c:418
+
+`redislib_port.c` -- abort stubs (deliberate, they must never run):
+    setTypeSize(), setTypeIsMemberAux()   src/t_set.c
+        Only the t_zset.c zunion/zdiff helper block reaches them, and only when a
+        command source object has type OBJ_SET. redislib has no SET objects, so
+        returning a plausible value would hide a wiring bug; they panic instead.
+
+`redislib_port.{h,c}` -- process setup:
+    getRandomBytes()          declared here; implemented by the ported util.c
+    redislib_panic()          fprintf + abort, like upstream _serverPanic()
+    redislib_init()           monotonicInit(), shared.minstring/maxstring,
+                              dictSetHashFunctionSeed(getRandomBytes(16)); runs
+                              once, from a `__attribute__((constructor))` so a
+                              facade never has to remember it
+
+Symbols the harness declares locally instead of through the shim (they exist
+only inside a .c file upstream): `crc16()` (crc16.c), `hllSparseToDense()`,
+`hllMerge()` (hyperloglog.c), the `redisPopcount/redisBitpos/*Bitfield/
+check*BitfieldOverflow` family and `BFOVERFLOW_WRAP`/`BFOVERFLOW_SAT`
+(bitops.c:576-578). Tasks 2 and 4 will need the same declarations; move them
+into a facade-side header when that happens.
+
+
+5. Verification
+---------------
+
+`tools/redislib-harness.c` is a pure-C assertion program over the ported kernels
+(geohash encode/decode round trip and the distance helpers, HLL 10k cardinality
+inside +/-2% plus sparse->dense and hllMerge, dict insert/rehash/lookup/delete
+with siphash, sds, util string<->number, intset encoding upgrades, adlist,
+bitops popcount/bitpos/bitfield/overflow, and the zset kernel: skiplist add/
+update/conditions/del, all rank orderings, listpack<->skiplist conversion
+round trip, zsetDup, direct zsl API). It ends with:
+
+    redislib harness OK: hll=9973
+
+Build and run it with a native Linux gcc from the Windows side:
+
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+      wsl -d Ubuntu-24.04 -- bash /mnt/e/git/skynetjit/tools/run-harness-wsl.sh
+
+The runner compiles every `.c` in `kernel/` (all 21, including the newly added
+listpack.c) plus the harness. gcc 13.3.0 build is warning-clean apart from 8
+"defined but not used" notices for the static `zsl*`/`zzl*`/`zdiff` helpers kept
+on purpose (section 2). `-Wno-unused-variable` and `-Wno-maybe-uninitialized`
+are passed by the runner; see its header comment for the reasons.
+
+`hll=9973` is the expected estimate for 10000 distinct elements at the default
+HLL precision (Redis' own standard error is 0.81%), and it is deterministic
+because the HLL hash is siphash with a randomised dict seed only for `dict`, not
+for HLL.
+
+Scope note: the harness is a Linux-native-gcc program (WSL Ubuntu 24.04, gcc
+13.3.0). On Windows the kernel objects are not part of any build target until
+the first facade task adds a `luaclib/redis/*.so` entry, so the MinGW compile of
+the kernel has not been made green yet. A per-file MinGW syntax scan
+(gcc 16, the flags `integration/Makefile` uses for RL_CFLAGS) reports exactly
+four portability problems, all in `util.c` and `sha256.c`:
+
+    sha256.h  `typedef uint32_t WORD` collides with windows.h' WORD
+              (unsigned short), reached through compat/win64/compat.h
+    util.c    mkdir(dname, 0755)  -- MSVCRT declares mkdir with one argument
+    util.c    redis_fsync(fd)     -- no fsync(), _commit() is the equivalent
+    util.c    same WORD collision through its sha256.h include
+
+They belong to the platform wiring task (Task 8), and all four are shim/flag
+level fixes -- no algorithm line has to change for them.
