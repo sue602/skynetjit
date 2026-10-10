@@ -124,7 +124,8 @@ tools/redis-diff/             # 差分对测 harness（§6.2）
 
 ### 3.3 命令面（完整清单）
 - **bitmap (7)**：setbit getbit bitcount(start/end 与 BYTE|BIT) bitpos(bit 值 参数)
-  bitop(and/or/xor/not/diff/andnot) bitfield(GET|SET|INCRBY|OVERFLOW WRAP|SAT|FAIL，
+  bitop(and/or/xor/not/diff/diff1/andor/one — 8 种操作，对照 8.10.0 bitopCommand)
+  bitfield(GET|SET|INCRBY|OVERFLOW WRAP|SAT|FAIL，
   类型 iN/uN 全支持含 i64) bitfield_ro
 - **geo (10)**：geoadd(NX XX CH) geopos geodist(米制单位四种) geohash
   georadius georadius_ro georadiusbymember georadiusbymember_ro

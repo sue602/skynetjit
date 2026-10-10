@@ -101,7 +101,8 @@ in total: 20 `.c` plus 23 `.h`, of which 40 come from Redis.
 Kernel files with the command layer removed (edit B):
     bitops.c          SETBIT/GETBIT/BITCOUNT/BITPOS/BITOP/BITFIELD* command
                       functions removed; popcount/bitpos/bitfield helpers kept
-    hyperloglog.c     PFADD/PFCOUNT/PFMERGE commands removed; hll* kept
+    hyperloglog.c     PFADD/PFCOUNT/PFMERGE/PFDEBUG/PFSELFTEST commands and
+                      isHLLObjectOrReply() removed; hll* kept
     t_zset.c          all Z*/ZRANGEBY* /ZUNION* command functions removed;
                       zsl*/zzl*/zset* kept
 
@@ -127,8 +128,40 @@ Not from Redis (authored for this port):
     redislib-src/kernel/redislib_port.h      shim, section 4
     redislib-src/kernel/redislib_port.c      shim, section 4
     redislib-src/kernel/t_zset.h             types/API block out of server.h
+    redislib-src/facade/hll_int.h            verbatim copy, section 3.1
+    redislib-src/facade/rl_common.{c,h}      the Lua-side object model
+    redislib-src/facade/bitmap.c             the redis.bitmap command facade
+    redislib-src/facade/hll.c                the redis.hll command facade
+    redislib-src/lua/{bitmap,hll}.lua        require shims for the business names
     tools/redislib-harness.c                 Task 1 self check, never shipped
     tools/run-harness-wsl.sh                 harness regression runner
+
+
+3.1 Verbatim copies kept outside kernel/
+----------------------------------------
+
+`facade/hll_int.h` -- `$RSRC/src/hyperloglog.c:183-207` (struct hllhdr, the
+HLL_*_CACHE / HLL_P / HLL_REGISTERS / HLL_BITS / HLL_*_ENCODING constants) and
+`:354-406` (HLL_DENSE_GET_REGISTER, HLL_DENSE_SET_REGISTER, the HLL_SPARSE_*
+opcodes, HLL_ALPHA_INF). Upstream keeps them file-local and has no
+hyperloglog.h, but the facade needs them: PFDEBUG GETREG reads registers with
+the dense macro, PFCOUNT assembles the 8-byte cached cardinality, PFSELFTEST
+drives the low-level register test.
+
+Copied lines were checked byte-for-byte against `$RSRC` (comment prose trimmed,
+67 code lines compared, no difference). This is the one place where the layout
+is duplicated, so it is also the one place where a silent drift would turn into
+corrupted HLL bytes instead of a compile error: `tools/redis-diff` (Task 10)
+compares a library-produced value with a real Redis one to cover it.
+
+Not copied on purpose: `invalid_hll_err` (a file-scope variable, re-declared by
+each consumer with the leading '-' that addReplyError() strips removed), the
+`simd_enabled` switch and the AVX2/NEON helpers (a redislib build defines
+neither HAVE_AVX2 nor HAVE_AARCH64_NEON, so the kernel compiles the scalar
+paths).
+
+Same technique, earlier: `kernel/t_zset.h` is the sorted-set/skiplist type and
+API block lifted verbatim out of `server.h` (see section 3).
 
 Files the brief listed that are NOT in `kernel/`: none. Files beyond the brief's
 list: `endianconv.c`, `monotonic.c`, `mt19937-64.{c,h}`, `sha256.{c,h}`,
@@ -172,6 +205,11 @@ path no redislib facade can reach.
                                           -> values copied from server.h /
                                              object.h
     C_OK, C_ERR, min, max, UNUSED         -> server.h
+                                          min/max are `#undef` first: on Windows
+                                          the compat headers pull windows.h into
+                                          the kernel translation units and
+                                          minwindef.h already spells them, which
+                                          otherwise warns on every kernel file
     ZSKIPLIST_MAXLEVEL, ZSKIPLIST_P, ZSKIPLIST_MAX_SEARCH -> server.h:656-658
     random() / srandom()                  -> redislib_random/redislib_srandom,
                                              only under `#if defined(_WIN32)`
@@ -179,6 +217,17 @@ path no redislib facade can reach.
                                              only for skiplist levels and dict
                                              sampling, so a xorshift64* with the
                                              same [0, RAND_MAX] contract is used)
+                                          `#undef` first for the same windows.h
+                                          reason, and `compat/win64/compat.h`
+                                          (a skynetjit file, not Redis) got the
+                                          matching `#ifndef random` /
+                                          `#ifndef srandom` guards so its
+                                          rand/srand mapping no longer redefines
+                                          -- and so silently replaces -- the shim
+                                          in whichever order the two headers are
+                                          reached. Either mapping satisfies the
+                                          [0, RAND_MAX] contract, so this is a
+                                          warning fix, not a behaviour change.
     mkdir(p,m) / O_NONBLOCK / fsync(fd)   -> _mkdir(p) / 0 / _commit(fd),
                                              only under `#if defined(_WIN32)`
                                              (the sole call sites are util.c's
@@ -255,8 +304,12 @@ Symbols the harness declares locally instead of through the shim (they exist
 only inside a .c file upstream): `crc16()` (crc16.c), `hllSparseToDense()`,
 `hllMerge()` (hyperloglog.c), the `redisPopcount/redisBitpos/*Bitfield/
 check*BitfieldOverflow` family and `BFOVERFLOW_WRAP`/`BFOVERFLOW_SAT`
-(bitops.c:576-578). Tasks 2 and 4 will need the same declarations; move them
-into a facade-side header when that happens.
+(bitops.c:576-578). The facades follow the same rule -- `facade/bitmap.c` and
+`facade/hll.c` each declare the kernel entry points they call, next to the
+kernel file they mirror, so a reader can compare the two. `hll_int.h` is the
+exception: it carries macros, not declarations, and cannot be inlined at a call
+site. If Task 4's sortedset facade needs the same block as bitmap.c, that is the
+point to lift the shared declarations into a facade header.
 
 
 5. Verification
@@ -288,18 +341,40 @@ HLL precision (Redis' own standard error is 0.81%), and it is deterministic
 because the HLL hash is siphash with a randomised dict seed only for `dict`, not
 for HLL.
 
+Runtime side, per facade task: `tests/redislib_smoke.lua` (started by
+`tests/redislib-config.lua` inside the built tree) drives the real Lua modules
+through skynet -- bitmap since Task 2, hll since Task 3, each asserting the
+Redis reply shapes and the upstream error texts. It is green on both platforms:
+`build.sh` on Windows and `build-linux.sh` under WSL Ubuntu 24.04 print
+`redislib-smoke: redislib modules succeeded`.
+
 Scope note: the harness is a Linux-native-gcc program (WSL Ubuntu 24.04, gcc
-13.3.0). On Windows the kernel objects are not part of any build target until
-the first facade task adds a `luaclib/redis/*.so` entry, so the MinGW compile of
-the kernel has not been made green yet. A per-file MinGW syntax scan
-(gcc 16, the flags `integration/Makefile` uses for RL_CFLAGS) reports exactly
-four portability problems, all in `util.c` and `sha256.c`:
+13.3.0).
+
+Windows (MinGW-w64 gcc 16) compiles the whole kernel and both shipped facades
+with zero warnings now. The four portability problems an early per-file syntax
+scan reported are fixed at shim/flag level, and none of them touched an
+algorithm line:
 
     sha256.h  `typedef uint32_t WORD` collides with windows.h' WORD
-              (unsigned short), reached through compat/win64/compat.h
+              -> guarded with `#ifndef _WINDEF_` (section 4)
     util.c    mkdir(dname, 0755)  -- MSVCRT declares mkdir with one argument
     util.c    redis_fsync(fd)     -- no fsync(), _commit() is the equivalent
-    util.c    same WORD collision through its sha256.h include
+              -> the `#if defined(_WIN32)` mapping block in redislib_port.h
+    RL_CFLAGS carried the repo's WIN_FORCE (compat.h -> windows.h), which is what
+              produced the WORD clash in the first place -> removed from
+              RL_CFLAGS; the kernel is plain C and needs no Lua compat headers
 
-They belong to the platform wiring task (Task 8), and all four are shim/flag
-level fixes -- no algorithm line has to change for them.
+Two more warning classes are suppressed for the kernel objects only, by
+`integration/redislib.mk`; the facade rule keeps the full `-Wall`:
+
+    -Wno-pointer-to-int-cast  LLP64 (`long` is 32-bit) warns on upstream's
+              pointer casts -- the alignment masks in bitops.c, the pointer terms
+              of dictFingerprint() in dict.c, lpRepr() in listpack.c. Each keeps
+              the bits it masks or feeds a debug-only fingerprint, so no
+              behaviour depends on the width; rewriting them would put
+              non-upstream casts inside verbatim kernel files.
+    -Wno-unused-variable      file-scope symbols whose only consumers were the
+              command layer deleted by edit B, e.g. hyperloglog.c's
+              invalid_hll_err (the facades re-declare the text).
+

@@ -104,8 +104,157 @@ local function test_bitmap()
 	assert(m:bitcount(5, 1) == 0)         -- start > end
 end
 
+local function test_hll()
+	local hll = require "hll"
+	local bitmap = require "bitmap"
+
+	local function errtext(f, ...)
+		local ok, message = pcall(f, ...)
+		assert(not ok, "expected an error")
+		-- LuaJIT prepends the raising position to errors that come out of C
+		-- code ("file:line: <message>"); the Redis text is what matters here.
+		return ((tostring(message)):gsub("^.-:%d+: ", "", 1))
+	end
+
+	-- PFADD replies :1 when the cardinality changed, :0 otherwise
+	local a = hll.new()
+	assert(a:pfadd("x", "y", "z") == 1)
+	assert(a:pfadd("x") == 0)
+	assert(a:pfcount() == 3)
+
+	-- a fresh value is an 18 byte sparse HLL covering all 16384 registers
+	local z = hll.new()
+	assert(z:pfcount() == 0)
+	assert(z:pfdebug("encoding") == "sparse")
+	assert(z:pfdebug("decode") == "Z:16384")
+
+	-- elements are Redis bulk strings: numbers take their decimal form and
+	-- embedded NUL bytes are kept
+	assert(a:pfadd(123) == 1)
+	assert(a:pfadd("123") == 0)
+	assert(a:pfadd("a\0b") == 1)
+	assert(a:pfcount() == 5)
+
+	-- PFCOUNT with several operands is the union, computed in a throwaway
+	-- value: nothing is written back to the operands
+	local b = hll.new()
+	assert(b:pfadd("z", "w") == 1)
+	assert(b:pfcount() == 2)
+	-- "z" is shared, so a(5) + b(2) = 6 distinct elements
+	assert(a:pfcount(b) == 6)
+	assert(hll.pfcount({ a, b }) == 6)
+	assert(hll.pfcount(a, b) == 6)
+	assert(a:pfcount({ b }) == 6)
+	assert(a:pfcount() == 5 and b:pfcount() == 2)
+	-- merging is the same value as adding every element to one HLL
+	local u = hll.new()
+	assert(u:pfadd("x", "y", "z", "123", "a\0b", "w") == 1)
+	assert(u:pfcount() == a:pfcount(b))
+
+	-- PFMERGE replies OK and is callable both as a module function (destination
+	-- first) and as a method (destination is self)
+	local m = hll.new()
+	assert(hll.pfmerge(m, { a, b }) == "OK")
+	assert(m:pfcount() == 6)
+	assert(m:pfmerge(a, b) == "OK")
+	assert(m:pfcount() == 6)
+	assert(m:pfadd("q") == 1)
+	assert(m:pfcount() == 7)
+
+	-- PFDEBUG ENCODING / TODENSE / GETREG
+	local d = hll.new()
+	assert(d:pfdebug("todense") == 1) -- sparse -> dense, replies :1
+	assert(d:pfdebug("encoding") == "dense")
+	assert(d:pfdebug("todense") == 0) -- already dense
+	local regs = d:pfdebug("getreg")
+	assert(type(regs) == "table" and #regs == 16384)
+	assert(regs[1] == 0 and regs[16384] == 0)
+	d:pfadd("promote-me")
+	assert(d:pfdebug("encoding") == "dense")
+	assert(errtext(function() d:pfdebug("decode") end) == "HLL encoding is not sparse")
+
+	-- sparse stays sparse while it is smaller than hll-sparse-max-bytes
+	local s = hll.new()
+	local added = 0
+	for i = 1, 800 do
+		local r = s:pfadd("sparse"..i)
+		-- PFADD replies 1 only when a register actually moved, so a distinct
+		-- element that lands on an already higher register replies 0
+		assert(r == 0 or r == 1, "PFADD must reply 0 or 1")
+		if r == 1 then added = added + 1 end
+	end
+	assert(added > 700, "registers updated: "..tostring(added))
+	assert(s:pfdebug("encoding") == "sparse")
+	assert(s:pfdebug("decode"):match("^[zZv]:%d") ~= nil)
+
+	-- and promotes to dense past the threshold (Redis: ~1500 unique elements)
+	for i = 801, 6000 do
+		local r = s:pfadd("sparse"..i)
+		assert(r == 0 or r == 1, "PFADD must reply 0 or 1")
+		if r == 1 then added = added + 1 end
+	end
+	assert(s:pfdebug("encoding") == "dense")
+	-- PFCOUNT stays within the documented error bounds for 6000 elements
+	local card = s:pfcount()
+	assert(card >= 5400 and card <= 6600, "cardinality out of bounds: "..tostring(card))
+	local regs2 = s:pfdebug("getreg")
+	assert(#regs2 == 16384)
+	local maxreg = 0
+	for _, v in ipairs(regs2) do assert(v >= 0 and v <= 63) if v > maxreg then maxreg = v end end
+	assert(maxreg >= 1)
+
+	-- PFDEBUG SIMD is answered by the kernel's runtime switch; this port builds
+	-- neither AVX2 nor NEON, so the reply is always "disabled"
+	assert(a:pfdebug("simd", "on") == "disabled")
+	assert(a:pfdebug("simd", "off") == "disabled")
+	assert(errtext(function() a:pfdebug("simd", "bogus") end) == "Argument must be ON or OFF")
+	assert(errtext(function() a:pfdebug("simd") end) ==
+		"Wrong number of arguments for the 'simd' subcommand")
+
+	-- PFSELFTEST is the upstream kernel self-test, replies OK
+	assert(a:pfselftest() == "OK")
+
+	-- error texts are the Redis ones
+	assert(errtext(function() a:pfdebug("bogus") end) ==
+		"Unknown PFDEBUG subcommand 'bogus'")
+	assert(errtext(function() a:pfdebug("getreg", 1) end) ==
+		"Wrong number of arguments for the 'getreg' subcommand")
+	assert(errtext(function() hll.pfcount() end) ==
+		"wrong number of arguments for 'pfcount' command")
+	local bm = bitmap.new()
+	assert(errtext(function() hll.pfcount(bm) end) ==
+		"WRONGTYPE Operation against a key holding the wrong kind of value")
+	assert(errtext(function() hll.pfmerge(bm, a) end) ==
+		"WRONGTYPE Operation against a key holding the wrong kind of value")
+	assert(errtext(function() a:pfadd({}) end) == "string or number expected, got table")
+
+	-- an element error mid-loop must not strand the object on the sds the
+	-- kernel already replaced: PFADD writes each result back before the next
+	-- argument can raise, so the value stays readable and freeable
+	local partial = hll.new()
+	assert(pcall(function() partial:pfadd("kept", {}) end) == false)
+	collectgarbage("collect")
+	assert(partial:pfcount() == 1)
+	assert(partial:pfadd("second") == 1)
+	assert(partial:pfcount() == 2)
+	assert(errtext(function() partial:pfdebug("todense", 1) end) ==
+		"Wrong number of arguments for the 'todense' subcommand")
+	assert(partial:pfdebug("encoding") == "sparse")
+	assert(partial:pfcount() == 2)
+
+	-- free()/__gc: the value is released once
+	local t = hll.new()
+	t:pfadd("gc-me")
+	t:free()
+	assert(pcall(function() t:pfcount() end) == false)
+	local g1 = hll.new()
+	g1 = nil
+	collectgarbage("collect")
+end
+
 local tests = {
 	{ "bitmap", test_bitmap },
+	{ "hll", test_hll },
 }
 
 local function run()
