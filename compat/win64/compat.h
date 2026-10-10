@@ -160,6 +160,14 @@ int skynetjit_sigaction(int signum, const struct skynetjit_sigaction *act,
 #define sigfillset skynetjit_sigfillset
 #define sigemptyset skynetjit_sigemptyset
 #define sigaction skynetjit_sigaction
+/* random()/srandom() are skipped when the includer already mapped them: the
+ * redislib kernel shim (redislib-src/kernel/redislib_port.h) installs its own
+ * stand-in with the same [0, RAND_MAX] contract, and a redefinition here would
+ * both warn on every kernel translation unit and silently undo that shim. */
+#ifndef random
 #define random rand
+#endif
+#ifndef srandom
 #define srandom srand
+#endif
 #endif

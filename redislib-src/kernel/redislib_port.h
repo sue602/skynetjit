@@ -178,10 +178,18 @@ int setTypeIsMemberAux(robj *set, char *str, size_t len, int64_t llval, int str_
 #define OBJ_ENCODING_SLICED_ARRAY 13 /* Encoded as sliced array */
 
 /* src/server.h:114-115, :106-107, :654, :656-657. The UNUSED spelling is the
- * one util.c:57 uses, so that file's own definition stays a no-op. */
+ * one util.c:57 uses, so that file's own definition stays a no-op.
+ * min/max are undefined first: the Windows compat headers pull windows.h into
+ * the kernel translation units, and minwindef.h already spells them. */
 #define C_OK 0
 #define C_ERR -1
+#ifdef min
+#undef min
+#endif
 #define min(a, b) ((a) < (b) ? (a) : (b))
+#ifdef max
+#undef max
+#endif
 #define max(a, b) ((a) > (b) ? (a) : (b))
 #define UNUSED(x) ((void)(x))
 #define ZSKIPLIST_MAXLEVEL 32 /* Should be enough for 2^64 elements */
@@ -239,12 +247,20 @@ extern redislibSharedStruct shared;
 #if defined(_WIN32)
 long redislib_random(void);
 void redislib_srandom(unsigned int seed);
+/* compat/win64/compat.h maps random/srandom to rand/srand; the shim above has
+ * the same [0, RAND_MAX] contract with a wider state, so it must win. */
+#ifdef random
+#undef random
+#endif
 #define random() redislib_random()
+#ifdef srandom
+#undef srandom
+#endif
 #define srandom(s) redislib_srandom(s)
 
 /* util.c's directory/file helpers (dirCreateIfMissing, dirRemove, the
- * redis_fsync call sites in anonTry/*) are dead code for redislib: no facade
- * and no kernel entry point performs filesystem I/O. These mappings exist
+ * redis_fsync call sites in the anonTry helpers) are dead code for redislib: no
+ * facade and no kernel entry point performs filesystem I/O. These mappings exist
  * purely so the verbatim kernel files compile with MinGW-w64, whose io.h
  * declares 1-arg _mkdir, has no O_NONBLOCK and names fsync _commit.
  * Range/semantic differences vs POSIX are therefore unreachable. */

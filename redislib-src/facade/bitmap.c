@@ -49,6 +49,12 @@ int checkSignedBitfieldOverflow(int64_t value, int64_t incr, uint64_t bits, int 
 
 #define RL_POPCOUNT(p,n) redisPopcount((void*)(p),(long)(n))
 
+/* LuaJIT's lauxlib.h does not mark luaL_error() noreturn (upstream Lua 5.2+
+ * does), so the compiler cannot see that the argument parsing below has no
+ * fall-through path. The range/opcode variables get sentinel initialisers:
+ * every reachable path assigns them before use. */
+#define RL_UNSET (-1)
+
 /* ---- argument helpers --------------------------------------------------- */
 
 /* getLongLongFromObjectOrReply with err text when NULL err given. */
@@ -155,7 +161,7 @@ lbitmap_getbit(lua_State *L) {
 static int
 lbitmap_bitcount(lua_State *L) {
     rl_object *o = rl_check(L, 1, RL_BITMAP);
-    long long start = 0, end;
+    long long start = 0, end = RL_UNSET;
     long long strlen_ = (long long)sdslen(o->str);
     unsigned char *p = (unsigned char*)o->str;
     int isbit = 0;
@@ -209,7 +215,7 @@ static int
 lbitmap_bitpos(lua_State *L) {
     rl_object *o = rl_check(L, 1, RL_BITMAP);
     long long bit = rl_checklonglong(L, 2, "bit is not an integer or out of range");
-    long long start = 0, end;
+    long long start = 0, end = RL_UNSET;
     long long strlen_ = (long long)sdslen(o->str);
     unsigned char *p = (unsigned char*)o->str;
     int isbit = 0, end_given = 0;
@@ -296,7 +302,7 @@ lbitmap_bitpos(lua_State *L) {
 static int
 lbitmap_bitop(lua_State *L) {
     const char *opname = luaL_checkstring(L, 1);
-    unsigned long op, j, numkeys, i;
+    unsigned long op = RL_UNSET, j, numkeys, i;
     unsigned long maxlen = 0, minlen = 0;
     unsigned long *len;
     unsigned char **src;
@@ -533,7 +539,7 @@ bitmap_bitfield_generic(lua_State *L, int ro_cmd) {
     for (j = 2; j <= argc; j++) {
         int remargs = argc - j;
         const char *subcmd = luaL_checkstring(L, j);
-        int opcode;
+        int opcode = RL_UNSET;
         long long i64 = 0;
         int sign = 0, bits = 0;
 
@@ -599,29 +605,29 @@ bitmap_bitfield_generic(lua_State *L, int ro_cmd) {
             if (thisop->sign) {
                 int64_t oldval, newval, wrapped = 0, retval;
                 int overflow;
-                oldval = getSignedBitfield(obj->str, thisop->offset, thisop->bits);
+                oldval = getSignedBitfield((unsigned char*)obj->str, thisop->offset, thisop->bits);
                 if (thisop->opcode == BITFIELDOP_INCRBY) {
                     overflow = checkSignedBitfieldOverflow(oldval, thisop->i64,
-                                    thisop->bits, thisop->owtype, (uint64_t*)&wrapped);
+                                    thisop->bits, thisop->owtype, &wrapped);
                     newval = overflow ? wrapped : oldval + thisop->i64;
                     retval = newval;
                 } else {
                     newval = thisop->i64;
                     overflow = checkSignedBitfieldOverflow(newval, 0,
-                                    thisop->bits, thisop->owtype, (uint64_t*)&wrapped);
+                                    thisop->bits, thisop->owtype, &wrapped);
                     if (overflow) newval = wrapped;
                     retval = oldval;
                 }
                 if (!(overflow && thisop->owtype == BFOVERFLOW_FAIL)) {
                     lua_pushinteger(L, (lua_Integer)retval);
-                    setSignedBitfield(obj->str, thisop->offset, thisop->bits, newval);
+                    setSignedBitfield((unsigned char*)obj->str, thisop->offset, thisop->bits, newval);
                 } else {
                     lua_pushboolean(L, 0);   /* addReplyNull -> false in array */
                 }
             } else {
                 uint64_t oldval, newval, retval, wrapped = 0;
                 int overflow;
-                oldval = getUnsignedBitfield(obj->str, thisop->offset, thisop->bits);
+                oldval = getUnsignedBitfield((unsigned char*)obj->str, thisop->offset, thisop->bits);
                 if (thisop->opcode == BITFIELDOP_INCRBY) {
                     newval = oldval + thisop->i64;
                     overflow = checkUnsignedBitfieldOverflow(oldval, thisop->i64,
@@ -637,7 +643,7 @@ bitmap_bitfield_generic(lua_State *L, int ro_cmd) {
                 }
                 if (!(overflow && thisop->owtype == BFOVERFLOW_FAIL)) {
                     lua_pushinteger(L, (lua_Integer)retval);
-                    setUnsignedBitfield(obj->str, thisop->offset, thisop->bits, newval);
+                    setUnsignedBitfield((unsigned char*)obj->str, thisop->offset, thisop->bits, newval);
                 } else {
                     lua_pushboolean(L, 0);
                 }
@@ -646,7 +652,7 @@ bitmap_bitfield_generic(lua_State *L, int ro_cmd) {
             /* GET: copy up to 9 bytes into a zero-padded local buffer. */
             unsigned char buf[9];
             long strlen_ = (long)sdslen(obj->str);
-            unsigned char *src = obj->str;
+            unsigned char *src = (unsigned char*)obj->str;
             int i;
             uint64_t byte = thisop->offset >> 3;
             memset(buf, 0, 9);
