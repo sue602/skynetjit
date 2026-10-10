@@ -344,6 +344,17 @@ lbitmap_bitop(lua_State *L) {
     }
     if (numkeys == 0) rl_error(L, "wrong number of arguments");
 
+    /* Every operand is type-checked before anything is allocated: rl_check()
+     * raises, and a raise longjmps out of this function with no chance to free,
+     * so checking after zmalloc() would leak the two arrays on every wrong-kind
+     * argument. Redis cannot fail here -- its operands are keys, already in the
+     * keyspace as strings. */
+    for (j = 0; j < numkeys; j++) {
+        lua_rawgeti(L, 2, (lua_Integer)(j+1));
+        rl_check(L, -1, RL_BITMAP);
+        lua_pop(L, 1);
+    }
+
     src = zmalloc(sizeof(unsigned char*) * numkeys);
     len = zmalloc(sizeof(unsigned long) * numkeys);
     for (j = 0; j < numkeys; j++) {

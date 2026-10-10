@@ -40,7 +40,6 @@ typedef struct rl_object {
                      * A GEO value IS a sorted set, like in Redis: the member is
                      * the member as the caller wrote it and the score is the 52
                      * bit geohash (geohashAlign52Bits). */
-    lua_State *L;   /* owning state, for __gc and for error messages */
 } rl_object;
 
 /* Raise the error reply Redis would have sent for this failure, as the text a
@@ -158,12 +157,10 @@ const char *rl_checkblob(lua_State *L, int idx, size_t *len);
  *   rl_pushok       -> "OK"         (simple status string)
  *   rl_pushint      -> integer
  *   rl_pushdouble   -> number       (Redis addReplyDouble; see below)
- *   rl_pushbool     -> 1 / 0        (Redis "integer reply used as boolean")
  */
 void rl_pushnilreply(lua_State *L);
 void rl_pushok(lua_State *L);
 void rl_pushint(lua_State *L, long long v);
-void rl_pushbool(lua_State *L, int v);
 
 /* Push the Redis string value a bitmap / HLL object holds, as Lua bytes (this
  * is what spec §4's dump() is, and what a GET of such a key returns). An object

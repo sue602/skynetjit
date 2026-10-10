@@ -321,10 +321,6 @@ void rl_pushdouble(lua_State *L, double v) {
     lua_pushnumber(L, (lua_Number)v);
 }
 
-void rl_pushbool(lua_State *L, int v) {
-    lua_pushinteger(L, v ? 1 : 0);
-}
-
 void rl_pushvalue(lua_State *L, rl_object *o) {
     size_t n = o->str ? sdslen(o->str) : 0;
 
@@ -355,7 +351,6 @@ void rl_newobject(lua_State *L, rl_kind kind) {
     rl_object *o = (rl_object *)lua_newuserdata(L, sizeof(*o));
     memset(o, 0, sizeof(*o));
     o->kind = kind;
-    o->L = L;
     luaL_getmetatable(L, class_names[kind]);
     lua_setmetatable(L, -2);
 }

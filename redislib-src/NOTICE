@@ -517,7 +517,17 @@ key too, and `zadd()` after that starts from empty in both).
 
 Bitmap: none beyond the object model. BITFIELD's offset cap is Redis' own
 `proto-max-bulk-len` default (512MB), taken as a constant because there is no
-config to read.
+config to read. One known, bounded leak: `bitmap_bitfield_generic()` keeps the ops
+array it is growing while it parses, and Lua errors `longjmp` out with no chance to
+free, so a malformed `BITFIELD` call that fails *after* an op was already parsed
+leaks up to ~32 bytes per op parsed so far (worst case a few hundred KB, once per
+bad call, never on a successful one). Removing it means turning the op parser into
+non-raising helpers -- a restructure of upstream's shape, not a mechanical edit --
+so it is recorded here instead. Every *other* facade site was made leak-free by
+validating before allocating: `BITOP` checks its operand kinds first, `ZADD` and
+`GEOADD` pre-validate scores and element types, `PFADD` walks its operands on the
+Lua stack, and the store commands' work areas are only allocated once nothing left
+in the function can raise.
 
 HyperLogLog: PFDEBUG SIMD has no runtime switch (this build defines neither
 HAVE_AVX2 nor HAVE_AARCH64_NEON), so it always answers "disabled", which is what
