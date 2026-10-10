@@ -21,6 +21,7 @@ LUAJIT_SRC := $(LUAJIT_DIR)/src
 
 CSERVICE_DIR := $(OUT)/cservice
 LUA_CLIB_DIR := $(OUT)/luaclib
+OBJ_DIR := $(OUT)/obj
 
 BASE_CFLAGS := -g -O2 -Wall -std=gnu99 -fno-strict-aliasing -fPIC $(BACKEND_CFLAGS) \
 	-I$(LUAJIT_SRC) -I$(SKYNET_DIR)/skynet-src
@@ -48,6 +49,11 @@ NB_SKYNET_DEP := $(SKYNET_SO)
 NB_RPATH := -Wl,-rpath,'$$ORIGIN/..'
 include $(INTEGRATION_DIR)/integration/netbull.mk
 
+# redislib kernels are plain C: BASE_CFLAGS is enough (it already carries
+# -I$(SKYNET_DIR)/skynet-src for skynet_malloc.h, and -fPIC for the .so links).
+RL_CFLAGS := $(BASE_CFLAGS)
+include $(INTEGRATION_DIR)/integration/redislib.mk
+
 .PHONY: all core modules tools clean print-config
 
 all: core modules tools
@@ -66,7 +72,7 @@ print-config:
 	@echo OUT=$(OUT)
 	@echo Linux socket backend: $(SOCKET_BACKEND)
 
-$(OUT) $(CSERVICE_DIR) $(LUA_CLIB_DIR):
+$(OUT) $(OBJ_DIR) $(CSERVICE_DIR) $(LUA_CLIB_DIR):
 	mkdir -p $@
 
 $(SKYNET_SO): $(addprefix $(SKYNET_DIR)/skynet-src/,$(SKYNET_SRC)) \

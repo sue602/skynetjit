@@ -6,6 +6,7 @@ parse_build_options() {
 	RUN_TESTS=1
 	SOCKET_BACKEND=epoll
 	NETBULL=1
+	REDISLIB=1
 	JOBS=${NUMBER_OF_PROCESSORS:-2}
 	if command -v nproc >/dev/null 2>&1; then
 		JOBS=$(nproc)
@@ -17,6 +18,8 @@ parse_build_options() {
 			--no-test) RUN_TESTS=0 ;;
 			--no-netbull) NETBULL=0 ;;
 			--netbull) NETBULL=1 ;;
+			--no-redislib) REDISLIB=0 ;;
+			--redislib) REDISLIB=1 ;;
 			--backend)
 				shift
 				[ "$#" -gt 0 ] || { echo "--backend needs a value" >&2; exit 2; }
@@ -51,6 +54,9 @@ Options:
   --no-netbull    Skip the vendored NetBull luaclib set (cjson, luacurl, lfs,
                   pb, sqlite3, zlib, zset) and its dependency downloads.
   --netbull       Build the NetBull luaclib set (default).
+  --no-redislib   Skip the redislib set (Redis 8.10.0 bitmap/geo/hll/sortedset
+                  kernels under redislib-src/ and luaclib/redis/*.so).
+  --redislib      Build the redislib set (default).
   --jobs N        Parallel build jobs (defaults to CPU count).
   --help          Show this help.
 USAGE

@@ -54,6 +54,10 @@ NB_SKYNET_DEP := $(SKYNET_DLL)
 NB_RPATH :=
 include $(INTEGRATION_DIR)/integration/netbull.mk
 
+# redislib kernels are plain C: BASE_CFLAGS plus the win32 compat force-include.
+RL_CFLAGS := $(BASE_CFLAGS) $(WIN_FORCE)
+include $(INTEGRATION_DIR)/integration/redislib.mk
+
 .PHONY: all core modules tools clean print-config
 
 all: core modules tools

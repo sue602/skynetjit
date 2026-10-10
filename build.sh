@@ -82,7 +82,8 @@ make -f "$ROOT_DIR/integration/Makefile" -j"$JOBS" \
 	CC="$CC" AR="$AR" RANLIB="$RANLIB" \
 	SKYNET_DIR="$WORK_DIR/skynet" \
 	LUAJIT_DIR="$WORK_DIR/luajit2" \
-	OUT="$OUT_DIR" INTEGRATION_DIR="$ROOT_DIR" NETBULL="$NETBULL" all
+	OUT="$OUT_DIR" INTEGRATION_DIR="$ROOT_DIR" NETBULL="$NETBULL" \
+	REDISLIB="$REDISLIB" all
 
 cp "$WORK_DIR/luajit2/src/lua51.dll" "$OUT_DIR/lua51.dll"
 cp "$WORK_DIR/luajit2/src/luajit.exe" "$OUT_DIR/luajit.exe"

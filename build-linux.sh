@@ -53,7 +53,7 @@ echo "Building Skynet for Linux ($SOCKET_BACKEND)..."
 make -f "$ROOT_DIR/integration/linux.mk" -j"$JOBS" \
 	CC="$CC" SKYNET_DIR="$WORK_DIR/skynet" LUAJIT_DIR="$WORK_DIR/luajit2" \
 	OUT="$OUT_DIR" INTEGRATION_DIR="$ROOT_DIR" SOCKET_BACKEND="$SOCKET_BACKEND" \
-	NETBULL="$NETBULL" all
+	NETBULL="$NETBULL" REDISLIB="$REDISLIB" all
 
 cp -a "$WORK_DIR/luajit2/src/libluajit.so" "$OUT_DIR/"
 ln -sf libluajit.so "$OUT_DIR/libluajit-5.1.so.2"
