@@ -554,6 +554,10 @@ local function test_sortedset()
 	assert(errtext(function() sortedset.zmpop({}, "min") end) ==
 		"ERR numkeys should be greater than 0")
 	assert(errtext(function() sortedset.zmpop({e2}, "min", "count") end) == "ERR syntax error")
+	-- ZMPOP is not a handle method: its operand list is argument 1, so the class
+	-- must not publish a name that can only ever fail for a receiver
+	assert(e1.zmpop == nil and e1.ZMPOP == nil)
+	assert(sortedset.zmpop ~= nil and sortedset.ZMPOP ~= nil)
 
 	-- ZRANDMEMBER: assert the shapes and the reachability, not the draw
 	local rr = sortedset.new()

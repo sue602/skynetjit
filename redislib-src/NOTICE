@@ -590,8 +590,11 @@ range *deletion* walks the range and calls `zsetDel()` per member instead of the
 file-local `zsl/zzlDeleteRangeBy*()` helpers, so it is O(M log N) rather than
 O(M + log N) on a skiplist; ZDIFF has only upstream's algorithm 2, not the
 1-versus-2 cost heuristic; ZMPOP's reply carries the source handle where Redis
-carries the key name, and ZUNION/ZINTER/ZDIFF/ZINTERCARD take their key list as
-one array table (Redis' `numkeys` integer has nothing to count here).
+carries the key name, and ZMPOP is a module function only (`sortedset.zmpop`,
+never `handle:zmpop`) because its operand list is argument 1 and a receiver
+would have nothing to be; ZUNION/ZINTER/ZDIFF/ZINTERCARD take their key list as
+one array table (Redis' `numkeys` integer has nothing to count here), while the
+STORE forms stay methods because their destination is the receiver.
 Scores are Lua numbers in both directions (spec §3.1's type principle); on the
 wire Redis sends a double as a bulk string, so `tools/redis-diff` compares them
 numerically.

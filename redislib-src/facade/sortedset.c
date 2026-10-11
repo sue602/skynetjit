@@ -1974,7 +1974,8 @@ static const luaL_Reg zset_methods[] = {
     {"zrangestore", lzrangestore},
     {"zpopmin", lzpopmin},
     {"zpopmax", lzpopmax},
-    {"zmpop", lzmpop},
+    /* no zmpop here: its operand list is argument 1, so a handle cannot be the
+     * receiver -- it is registered on the module table only. */
     {"zrandmember", lzrandmember},
     {"zunionstore", lzunionstore},
     {"zinterstore", lzinterstore},
