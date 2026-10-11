@@ -100,7 +100,16 @@ rl_geoLongLatFromMember(robj *zobj, sds member, double *xy) {
 /* extractUnitOrReply() -- geo.c:134. */
 double
 rl_geoUnitArg(lua_State *L, int idx) {
-    const char *u = luaL_checkstring(L, idx);
+    const char *u;
+
+    /* A caller that handed something that is not a word (a table, a nil) gets
+     * the same answer Redis gives for a word it does not know: there is no
+     * Lua-side "string expected" in a client's vocabulary, and numbers coerce,
+     * so 5 lands here as "5" and is refused exactly as the server refuses it. */
+    if (!lua_isstring(L, idx))
+        return rl_error(L,
+            "unsupported unit provided. please use M, KM, FT, MI"), -1;
+    u = lua_tostring(L, idx);
 
     if (!strcasecmp(u, "m"))  return 1;
     if (!strcasecmp(u, "km")) return 1000;

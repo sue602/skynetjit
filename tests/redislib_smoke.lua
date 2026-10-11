@@ -1265,6 +1265,80 @@ local function test_scale()
 end
 
 
+-- An argument that is not there at all is a different failure from one that is
+-- there in the wrong shape: a server answers the first from its command table
+-- ("wrong number of arguments for ...") and the second from inside the command.
+-- There is no command table here, so the facades carry that line themselves --
+-- these are the texts a live redis-server 8.10.0 was asked for the same shapes
+-- (tools/redis-diff), and no LuaJIT "bad argument" text may reach a caller.
+local function test_missing_args()
+	local bitmap = require "bitmap"
+	local hll = require "hll"
+	local sortedset = require "sortedset"
+	local geo = require "geo"
+	local s1, s2, d = sortedset.new(), sortedset.new(), sortedset.new()
+	s1:zadd(1, "a")
+	s2:zadd(2, "b")
+	local b = bitmap.new()  b:setbit(0, 1)
+	local u = hll.new()     u:pfadd("e")
+	local g = geo.new()     g:geoadd(13.36, 38.11, "CT")
+
+	local function arity(fn, cmd)
+		assert(errtext(fn) == "ERR wrong number of arguments for '" .. cmd ..
+			"' command")
+	end
+
+	arity(function() bitmap.bitop() end, "bitop")
+	arity(function() bitmap.bitop("and") end, "bitop")
+	arity(function() sortedset.zmpop() end, "zmpop")
+	arity(function() sortedset.zunion() end, "zunion")
+	arity(function() sortedset.zintercard() end, "zintercard")
+	arity(function() sortedset.zunionstore() end, "zunionstore")
+	arity(function() sortedset.zinterstore() end, "zinterstore")
+	arity(function() sortedset.zdiffstore() end, "zdiffstore")
+	arity(function() sortedset.zunionstore(d) end, "zunionstore")
+	arity(function() d:zunionstore() end, "zunionstore")
+	arity(function() sortedset.zrangestore() end, "zrangestore")
+	arity(function() d:zrangestore() end, "zrangestore")
+	arity(function() u:pfdebug() end, "pfdebug")
+	arity(function() geo.geosearchstore() end, "geosearchstore")
+	arity(function() geo.geosearchstore(g) end, "geosearchstore")
+	arity(function() g:geosearchstore() end, "geosearchstore")
+	arity(function() g:georadius(1, 2, 3) end, "georadius")
+	arity(function() g:georadiusbymember("CT", 10) end, "georadiusbymember")
+
+	-- ...while the argument that *is* there in the wrong shape keeps a text that
+	-- says which shape was wanted, and a handle of the wrong kind still gets
+	-- Redis' own WRONGTYPE.
+	assert(errtext(function() bitmap.bitop("and", "x") end) ==
+		"ERR table expected, got string")
+	assert(errtext(function() sortedset.zmpop("max") end) ==
+		"ERR table expected, got string")
+	assert(errtext(function() sortedset.zunionstore(d, "x") end) ==
+		"ERR table expected, got string")
+	assert(errtext(function() sortedset.zunionstore(b, { s1, s2 }) end) ==
+		"WRONGTYPE Operation against a key holding the wrong kind of value")
+	assert(errtext(function() g:georadius(1, 2, 3, {}) end) ==
+		"ERR unsupported unit provided. please use M, KM, FT, MI")
+
+	-- an argument that is there but not a word: no raw luaL_check* is left in the
+	-- facades, so these answer with the facade's own registered text, never with
+	-- LuaJIT's "bad argument #N to '?'"
+	assert(errtext(function() b:bitfield({}) end) ==
+		"ERR string or number expected, got table")
+	assert(errtext(function() b:bitfield("overflow", {}) end) ==
+		"ERR string or number expected, got table")
+	assert(errtext(function() b:bitfield_ro({}) end) ==
+		"ERR string or number expected, got table")
+	assert(errtext(function() u:pfdebug({}) end) ==
+		"ERR string or number expected, got table")
+
+	-- and the calls those absences were blocking still work
+	assert(#g:georadius(13.36, 38.11, 10, "km") == 1)
+	assert(sortedset.zunionstore(d, { s1, s2 }) == 2)
+	assert(u:pfdebug("encoding") == "sparse")
+end
+
 local tests = {
 	{ "bitmap", test_bitmap },
 	{ "hll", test_hll },
@@ -1273,6 +1347,7 @@ local tests = {
 	{ "dump", test_dump },
 	{ "wrapper", test_wrapper },
 	{ "scale", test_scale },
+	{ "missing-args", test_missing_args },
 }
 
 local function run()

@@ -122,6 +122,27 @@ void rl_checkmember(lua_State *L, int idx) {
                  lua_typename(L, lua_type(L, idx)));
 }
 
+/* An argument a Redis command gets from its argv, so "not passed" is a different
+ * failure from "passed the wrong kind": a server rejects the first with its
+ * command table's arity check and the second inside the command. This port has
+ * no command table (NOTICE §6), so both texts are produced here -- the arity
+ * line verbatim from server.c:2225, the kind line the facade's own, since a RESP
+ * argument cannot be a table at all (NOTICE §7). */
+void rl_checklist(lua_State *L, int idx, const char *cmdname) {
+    if (lua_gettop(L) < idx)
+        rl_error(L, "wrong number of arguments for '%s' command", cmdname);
+    if (!lua_istable(L, idx))
+        rl_error(L, "table expected, got %s",
+                 lua_typename(L, lua_type(L, idx)));
+}
+
+const char *rl_argstring(lua_State *L, int idx, const char *cmdname) {
+    if (lua_gettop(L) < idx)
+        rl_error(L, "wrong number of arguments for '%s' command", cmdname);
+    rl_checkmember(L, idx);
+    return lua_tostring(L, idx);
+}
+
 sds rl_member(lua_State *L, int idx) {
     const char *s;
     size_t len;

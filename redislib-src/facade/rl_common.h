@@ -102,6 +102,15 @@ sds rl_member(lua_State *L, int idx);
  * after memory has been taken. */
 void rl_checkmember(lua_State *L, int idx);
 
+/* A required command argument that a Lua caller did not pass at all, and one
+ * that came with the wrong kind: a server answers the first from its command
+ * table's arity check and the second from inside the command. There is no
+ * command table here (NOTICE §6), so both texts come from these two helpers --
+ * the arity line is Redis' own (server.c:2225), the kind line reuses
+ * rl_checkmember's documented text. cmdname is the lower-case Redis command. */
+void rl_checklist(lua_State *L, int idx, const char *cmdname);
+const char *rl_argstring(lua_State *L, int idx, const char *cmdname);
+
 /* Release one kernel zset object -- object.c's freeSortedSet() for the two
  * encodings a redislib zset ever reaches. rl_free_ud() calls it for the
  * RL_ZSET / RL_GEO arm, and a facade that swaps the payload of a live object

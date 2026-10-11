@@ -321,7 +321,7 @@ rl_geo_member_or_empty(lua_State *L, robj *zobj, sds member, double *xy,
  * are the same call). */
 static int
 rl_geosearch_generic(lua_State *L, int srcidx, int flags) {
-    robj *zobj = rl_check(L, srcidx, RL_GEO)->zobj;
+    robj *zobj;
     rl_object *storekey = NULL;
     int storedist = 0;
     int base_args;
@@ -336,6 +336,23 @@ rl_geosearch_generic(lua_State *L, int srcidx, int flags) {
     geoArray *ga;
     long result_length, returned_items;
     long option_length = 0;
+
+    /* Arguments this family cannot do without: the source handle, and for the
+     * GEORADIUS shape the <radius> <unit> pair. A server stops at its command
+     * table's arity check here, before it can say anything about a key's type --
+     * which is why reporting WRONGTYPE for the handle the caller *did* pass
+     * would blame the wrong thing. */
+    if (top < srcidx || (flags & RL_RADIUS_COORDS && top < 5) ||
+        (flags & RL_RADIUS_MEMBER && top < 4))
+        return rl_error(L, "wrong number of arguments for '%s' command",
+            (flags & RL_GEOSEARCHSTORE) ? "geosearchstore" :
+            (flags & RL_GEOSEARCH) ? "geosearch" :
+            (flags & RL_RADIUS_MEMBER) ?
+                (flags & RL_RADIUS_NOSTORE ? "georadiusbymember_ro"
+                                           : "georadiusbymember") :
+                (flags & RL_RADIUS_NOSTORE ? "georadius_ro" : "georadius"));
+
+    zobj = rl_check(L, srcidx, RL_GEO)->zobj;
 
     memset(&shape, 0, sizeof(shape));
 

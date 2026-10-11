@@ -312,7 +312,7 @@ lbitmap_bitpos(lua_State *L) {
 
 static int
 lbitmap_bitop(lua_State *L) {
-    const char *opname = luaL_checkstring(L, 1);
+    const char *opname = rl_argstring(L, 1, "bitop");
     unsigned long op = RL_UNSET, j, numkeys, i;
     unsigned long maxlen = 0, minlen = 0;
     unsigned long *len;
@@ -329,7 +329,7 @@ lbitmap_bitop(lua_State *L) {
     else if ((opname[0]=='o'||opname[0]=='O') && !strcasecmp(opname,"one"))   op = BITOP_ONE;
     else rl_error(L, "-ERR syntax error");
 
-    luaL_checktype(L, 2, LUA_TTABLE);
+    rl_checklist(L, 2, "bitop");
     numkeys = (unsigned long)lua_objlen(L, 2);
     if (op == BITOP_NOT && numkeys != 1)
         rl_error(L, "BITOP NOT must be called with a single source key.");
@@ -551,6 +551,7 @@ rl_bitfield_type(lua_State *L, int idx, int *sign, int *bits) {
 static void
 bitmap_bitfield_generic(lua_State *L, int ro_cmd) {
     rl_object *obj = rl_check(L, 1, RL_BITMAP);
+    const char *cmdname = ro_cmd ? "bitfield_ro" : "bitfield";
     int argc = lua_gettop(L);
     int j, numops = 0, readonly = 1;
     struct rl_bitfieldOp *ops = NULL;
@@ -560,7 +561,7 @@ bitmap_bitfield_generic(lua_State *L, int ro_cmd) {
 
     for (j = 2; j <= argc; j++) {
         int remargs = argc - j;
-        const char *subcmd = luaL_checkstring(L, j);
+        const char *subcmd = rl_argstring(L, j, cmdname);
         int opcode = RL_UNSET;
         long long i64 = 0;
         int sign = 0, bits = 0;
@@ -572,7 +573,7 @@ bitmap_bitfield_generic(lua_State *L, int ro_cmd) {
         else if (!strcasecmp(subcmd,"incrby") && remargs >= 3)
             opcode = BITFIELDOP_INCRBY;
         else if (!strcasecmp(subcmd,"overflow") && remargs >= 1) {
-            const char *owtypename = luaL_checkstring(L, j+1);
+            const char *owtypename = rl_argstring(L, j+1, cmdname);
             j++;
             if (!strcasecmp(owtypename,"wrap")) owtype = BFOVERFLOW_WRAP;
             else if (!strcasecmp(owtypename,"sat")) owtype = BFOVERFLOW_SAT;

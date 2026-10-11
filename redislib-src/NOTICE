@@ -488,6 +488,19 @@ and `build-linux.sh --no-sync` both `Tests passed`, and differential seed 424242
 (4000 ops) still reports 0 unexplained differences with the same
 `no-command-table` bucket count (11).
 
+Argument-shape sweep (2026-10-11, the same enumeration extended). Calling every
+published name for real is not only a way to find unreachable names: it also
+shows what each one answers when it is handed too little. The probe calls every
+class name on a fresh handle with no arguments, every module name the same way,
+every name again on a handle that has been `free()`d, and every `load()` with
+400 mutated or truncated copies of a valid blob. It found, and this tree now
+fixes, the "bad argument" leaks section 7 describes; after the fix the same
+sweep reports no `bad argument` text anywhere, no method that succeeds on a
+released handle except `pfselftest` (which reads no key in Redis either), no
+name in a table it cannot work from (the `zmpop` case above), the alias set
+matching the command set on both tables, and no `load()` rejection that surfaces
+as an internal Lua failure rather than a Redis error.
+
 Differential check against a live server (`tools/redis-diff`, manual by design --
 it needs a second build and a running process, so it is not in the one-shot test):
 `gen.lua` writes a deterministic operation log, `replay_redis.py` runs it against
@@ -560,8 +573,9 @@ The suite is part of the project's one-shot runtime test since Task 8:
 `luaclib/redis/{bitmap,hll,sortedset,geo}.so` are all present and prints
 `redislib set not built; skipping its smoke test.` otherwise -- the same shape the
 NetBull clibs section uses, so `--no-redislib` builds stay green without it. Its
-seven families (bitmap, hll, sortedset, geo, dump, wrapper, scale) run in 2.3 s on
-the MinGW-w64 build, which is why the 1e6-element family is in the default test
+eight families (bitmap, hll, sortedset, geo, dump, wrapper, scale, missing-args)
+run in 2.8 s on the MinGW-w64 build, which is why the 1e6-element family is in
+the default test
 rather than a manual probe: spec §6.1 asks for correctness at that size, and every
 assertion in `test_scale()` is an exact value (rank, count, slice contents, a
 LIMIT walk, the pairs sugar, and a deletion after which the ranks still line up),
@@ -683,7 +697,11 @@ table, so the handler's own complaint is what surfaces: `GEOSEARCH key
 FROMLONLAT 15 37` (no BYRADIUS/BYBOX) gets
 `ERR wrong number of arguments for 'geosearch' command` from a server and
 `ERR exactly one of BYRADIUS and BYBOX can be specified for geosearch` here. Both
-are Redis' own sentences; which of the two fires is the difference.
+are Redis' own sentences; which of the two fires is the difference. The same
+covers an argument that is not passed at all where a *value* was expected:
+`ZRANK key` gets arity from a server, `handle:zrank()` gets
+`"string or number expected, got no value"` here -- see section 7 for why the
+presence-only arguments were fixed and these were not.
 
 `no-keyspace` -- a command that looks its key up on the server can be told the key
 is not there, and says so: `PFDEBUG todense missingkey` replies
@@ -725,21 +743,51 @@ longitude,latitude pair 200.000000,37.000000`). LuaJIT still prepends its usual
 the one difference from a RESP client, and `errtext()` in the smoke test strips
 it.
 
-Two texts are the facade's own, because Redis has no equivalent failure:
+Three texts are the facade's own, because Redis has no equivalent failure:
 `"string or number expected, got %s"` (a Lua argument can be a table or a
 handle, a RESP argument cannot), `"string expected, got %s"` (the same, for
 `load()`, where a number must not be coerced because the argument is a byte
-string), and the `luaL_checkstring()` "bad argument" message that option words
-produce when handed a non-string. Upstream cannot express any of them -- every
+string), and `"table expected, got %s"` (the same, for the operand list the
+multi-object commands take). Upstream cannot express any of them -- every
 element of `c->argv` is already a string there -- so these read as Lua errors
 with the generic code in front of them.
 
-That claim is checked, not asserted: a scan of the facades' 113 `rl_error(L,
-"...")` sites against `$RSRC` finds 111 whose literal appears verbatim in the
+The rule these three do NOT cover, and the reason they are the only three: a
+`luaL_checkstring()`/"bad argument" message used to reach callers wherever the
+code needed an argument to *be there* -- a subcommand or option word, an operand
+list, a STORE form's destination, a GEORADIUS unit. "bad argument #N to '?'" is
+not a sentence any Redis client can be handed, and the `?` could not even name
+the command. Those sites now go through `rl_checklist()` / `rl_argstring()`:
+absence answers with the server's own line (`"wrong number of arguments for '%s'
+command"`, verbatim from the arity check at `server.c:2225`, and confirmed
+against a live 8.10.0 for each shape), while an argument of the wrong kind
+answers with one of the three texts above.
+
+What that does *not* claim, stated because the difference is visible: an
+argument read as a value (`rl_member()`, `rl_checklong()`, the float readers --
+51 call sites across the four facades) is still refused by the value parser
+first, so a missing member replies
+`"string or number expected, got no value"` where a server would have stopped at
+its command table and said `wrong number of arguments for 'zrank' command`.
+Making that side match too means passing the command name to every value reader
+and deciding, per command, which arguments are required: a separate change of
+some size, not part of this one. It is recorded as a deviation in section 6
+(`no-command-table`), and `tools/redis-diff` cannot see it because every
+operation in the generated log is well-formed.
+`tests/redislib_smoke.lua`'s `missing-args` family pins the three outcomes this
+rule does cover: arity for absence, a facade text for the wrong kind, and
+`WRONGTYPE` for a handle of the wrong kind -- the last being exactly what a
+server says in that case.
+
+That claim is checked, not asserted: a scan of the facades' 119 `rl_error(L,
+"...")` sites against `$RSRC` finds 116 whose literal appears verbatim in the
 pristine tree (allowing for the `\r\n` that the `shared.*` error objects carry),
-and the 2 remaining ones are the sentences above. The PFCOUNT arity message goes
-through `'%s' command` with the name passed as an argument for exactly that
-reason: no facade literal is a paraphrase of a Redis message.
+and the 3 remaining ones are the sentences above. The arity messages go through
+`'%s' command` with the name passed as an argument for exactly that reason: no
+facade literal is a paraphrase of a Redis message. `grep` over `facade/*.c`
+finds no remaining raw `luaL_check*` call, which is what makes "no `bad
+argument` text can reach a caller" a property of the code rather than of the
+cases one probe happened to try.
 
 The Lua wrappers (Task 7) raise their own texts on purpose, before anything
 reaches C: `zadd element 1 must be {score, member}`, `geoadd takes the options

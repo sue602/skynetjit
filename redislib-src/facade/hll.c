@@ -352,7 +352,7 @@ lhll_pfmerge(lua_State *L) {
 static int
 lhll_pfdebug(lua_State *L) {
     rl_object *o = rl_check(L, 1, RL_HLL);
-    const char *cmd = luaL_checkstring(L, 2);
+    const char *cmd = rl_argstring(L, 2, "pfdebug");
     struct hllhdr *hdr;
     robj tmp;
     int top = lua_gettop(L);
@@ -365,10 +365,13 @@ lhll_pfdebug(lua_State *L) {
         if (top != 3)
             return rl_error(L,
                 "Wrong number of arguments for the '%s' subcommand", cmd);
-        if (!strcasecmp(luaL_checkstring(L, 3),"on")) {
-        } else if (!strcasecmp(luaL_checkstring(L, 3),"off")) {
-        } else {
-            rl_error(L, "Argument must be ON or OFF");
+        {
+            const char *sw = rl_argstring(L, 3, "pfdebug");
+            if (!strcasecmp(sw,"on")) {
+            } else if (!strcasecmp(sw,"off")) {
+            } else {
+                rl_error(L, "Argument must be ON or OFF");
+            }
         }
         lua_pushliteral(L, "disabled");
         return 1;

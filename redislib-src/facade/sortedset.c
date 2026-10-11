@@ -919,6 +919,12 @@ lzrevrangebylex(lua_State *L) {
  * sortedset.zrangestore(dst, src, ...) and dst:zrangestore(src, ...). */
 static int
 lzrangestore(lua_State *L) {
+    /* the source handle is argument 2 in both call shapes; without it there is
+     * nothing to range over, and a server would have stopped at its arity check
+     * rather than reported anything about the destination's type. */
+    if (lua_gettop(L) < 2)
+        return rl_error(L, "wrong number of arguments for '%s' command",
+                        "zrangestore");
     (void)rl_check(L, 1, RL_ZSET);
     return rl_zrange_generic(L, 1, RL_ZRANGE_AUTO, RL_RANGE_AUTO);
 }
@@ -979,7 +985,7 @@ lrank_generic(lua_State *L, int reverse, const char *cmdname) {
     if (top > 3)
         return rl_error(L, "wrong number of arguments for '%s' command", cmdname);
     if (top == 3) {
-        if (!strcasecmp(luaL_checkstring(L, 3), "withscore")) opt_withscore = 1;
+        if (!strcasecmp(rl_argstring(L, 3, cmdname), "withscore")) opt_withscore = 1;
         else return rl_error(L, "-ERR syntax error");
     }
 
@@ -1241,7 +1247,7 @@ lzmpop(lua_State *L) {
     rl_pop_result res;
     long j;
 
-    luaL_checktype(L, 1, LUA_TTABLE);
+    rl_checklist(L, 1, "zmpop");
     kn = (unsigned int)lua_objlen(L, 1);
     if (kn == 0) return rl_error(L, "numkeys should be greater than 0");
 
@@ -1591,6 +1597,12 @@ lzrandmember(lua_State *L) {
 static int
 rl_setop_generic(lua_State *L, int keyidx, int op, int cardinality_only,
                  const char *cmdname) {
+    /* A store form called with no destination at all: the server's arity check
+     * fires before anything can be said about a key's type, so saying WRONGTYPE
+     * here would blame an object the caller never passed. */
+    if (keyidx == 2 && lua_gettop(L) < 2)
+        return rl_error(L, "wrong number of arguments for '%s' command", cmdname);
+
     rl_object *dst = keyidx == 2 ? rl_check(L, 1, RL_ZSET) : NULL;
     zsetopsrc *src;
     zsetopval zval;
@@ -1603,7 +1615,7 @@ rl_setop_generic(lua_State *L, int keyidx, int op, int cardinality_only,
     zset *dstzset = NULL;
     unsigned long cardinality = 0;
 
-    luaL_checktype(L, keyidx, LUA_TTABLE);
+    rl_checklist(L, keyidx, cmdname);
     setnum = (long)lua_objlen(L, keyidx);
     if (setnum < 1)
         return rl_error(L,
@@ -1938,7 +1950,9 @@ lzintercard(lua_State *L) {
 /* The store family: the destination is argument 1 in both call shapes. */
 static int
 lsetop_store(lua_State *L, int op, const char *cmdname) {
-    (void)rl_check(L, 1, RL_ZSET);
+    /* the destination is checked, and its absence reported, by
+     * rl_setop_generic() -- which does that before it looks at any type, so a
+     * missing argument cannot be mistaken for a wrong one. */
     return rl_setop_generic(L, 2, op, 0, cmdname);
 }
 
