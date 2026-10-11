@@ -13,7 +13,7 @@ import json
 import sys
 
 
-from resp2 import Resp, as_hex
+from resp2 import as_hex, open_scratch_db
 
 
 # oplog command -> wire command. The log's `args` is the library's own argument
@@ -99,12 +99,11 @@ def main():
     ap.add_argument("--port", type=int, default=6399)
     ap.add_argument("--oplog", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--db", type=int, default=0,
+                    help="database to use; it must be empty (see resp2.py)")
     args = ap.parse_args()
 
-    r = Resp(args.host, args.port)
-    r.cmd("FLUSHDB")
-    if r.cmd("PING") != "PONG":
-        sys.exit("redis is not answering on %s:%d" % (args.host, args.port))
+    r = open_scratch_db(args.host, args.port, args.db)
 
     n = 0
     with open(args.oplog) as f, open(args.out, "w") as out:

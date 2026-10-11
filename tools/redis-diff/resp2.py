@@ -78,6 +78,37 @@ class Resp:
 
 
 
+def open_db(host, port, db=0):
+    """Connect, check the server answers, and select `db` when it is not 0."""
+    r = Resp(host, port)
+    if r.cmd("PING") != "PONG":
+        raise SystemExit("redis is not answering on %s:%d" % (host, port))
+    if db and r.cmd("SELECT", db) != "OK":
+        raise SystemExit("cannot select db%d on %s:%d" % (db, host, port))
+    return r
+
+
+def open_scratch_db(host, port, db=0):
+    """Connect, select `db`, verify it is empty, flush it, return the client.
+
+    The replay harness was written for a throwaway server, and its first command
+    is FLUSHDB -- so pointing it at an instance that holds real data would delete
+    that data before it compared anything. A non-empty target is therefore a
+    stop, not a warning, and there is deliberately no override: clearing a
+    database somebody else's keys live in needs a person to say which keys they
+    own, not a flag.
+    """
+    r = open_db(host, port, db)
+    size = r.cmd("DBSIZE")
+    if size != 0:
+        raise SystemExit(
+            "refusing to flush: db%d on %s:%d still holds %s keys. Run this "
+            "against a throwaway server, or pass --db <empty db>."
+            % (db, host, port, size))
+    r.cmd("FLUSHDB")
+    return r
+
+
 def as_hex(v):
     """A bulk reply's raw bytes, as hex, whichever way RESP delivered them.
 

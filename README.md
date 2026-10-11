@@ -219,5 +219,10 @@ TCP 和 UDP 回环往返，覆盖 accept/connect/recv/send/recvmsg/sendmsg 的�
   `dump()`/`load()` 中只有 bitmap 与 hll 的字节等于真 Redis 的 `GET`/`SET` 值，
   sortedset 与 geo 用的是本项目 §4 定义的非 RDB 小端格式。逐条偏差见
   `redislib-src/NOTICE` 第 6 节。
+  对目标是 **Redis 8.10.0**：`BITOP DIFF/DIFF1/ANDOR/ONE` 与 GEOSEARCH 的 `ASC`
+  排序在 7.x 服务器上行为不同，拿 7.0.12 做同日志对比时这几处必然不一致（差异
+  全部归因于版本，实测记录见 NOTICE 第 5 节）。另外 LuaJIT 是 5.1 数值模型，
+  `bitfield` 的宽类型超过 2^53 时读写两侧都会在 Lua 层舍入（内核位布局精确，
+  可用 `dump()` 字节核对）。
 - 上游最新代码将来如果改变被补丁覆盖的上下文，构建会立即失败并提示补丁未应用，
   需要同步更新本仓库兼容层。

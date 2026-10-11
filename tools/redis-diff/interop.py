@@ -18,12 +18,22 @@ import json
 import struct
 import sys
 
-from resp2 import Resp, as_hex
+from resp2 import as_hex, open_db
 
 HLL_KEY = "interop:hll"
 STR_KEY = "interop:str"
 ZSET_KEY = "interop:zset"
 GEO_KEY = "interop:geo"
+# Both phases work entirely inside these four names, so they clear exactly them
+# and never FLUSHDB: the round trip used to wipe the whole selected database,
+# which is fine on a throwaway server and destructive on one that holds data.
+OWNED_KEYS = (HLL_KEY, STR_KEY, ZSET_KEY, GEO_KEY)
+
+
+def fresh(r):
+    for key in OWNED_KEYS:
+        r.cmd("DEL", key)
+    return r
 
 
 def blob_records(blob_hex):
@@ -44,8 +54,7 @@ def blob_records(blob_hex):
 
 
 def phase_export(a):
-    r = Resp(a.host, a.port)
-    r.cmd("FLUSHDB")
+    r = fresh(open_db(a.host, a.port, a.db))
     for i in range(1, 401):
         r.cmd("PFADD", HLL_KEY, "e%d" % i)
     r.cmd("SETBIT", STR_KEY, 500, 1)
@@ -70,8 +79,7 @@ def phase_import(a):
     lib = json.load(open(a.lib))
     redis_side = json.load(open(a.redis))
     report = json.load(open(a.report))
-    r = Resp(a.host, a.port)
-    r.cmd("FLUSHDB")
+    r = fresh(open_db(a.host, a.port, a.db))
 
     checks = []
 
@@ -141,6 +149,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=6399)
+    ap.add_argument("--db", type=int, default=0,
+                    help="database to use; it must be empty (see resp2.py)")
     sub = ap.add_subparsers(dest="phase", required=True)
 
     e = sub.add_parser("export")

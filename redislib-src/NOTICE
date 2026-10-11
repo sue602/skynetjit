@@ -519,6 +519,24 @@ were nil where Redis always answers a number, `PFMERGE` losing the destination's
 registers, and the search family raising where Redis answers the empty array -- all
 described with their evidence in `tools/redis-diff/REPORT-2026-10-10.md`.
 
+Same oplog, older server (2026-10-11). Seed 900001 / 4000 ops was replayed
+against a local `redis-server` **7.0.12** as well (Windows build, in its own
+empty db1; the harness refuses to flush a non-empty database -- see
+`tools/redis-diff`), and the library side ran on the identical oplog, confirmed
+by md5. That comparison shows 735 differing records, and every one of them is a
+version gap rather than a port gap:
+`BITOP DIFF/DIFF1/ANDOR/ONE` are Redis 8 operations, so the 7.0.12 side answers
+`ERR syntax error` on the 42 ops that use them and never creates those
+destination keys -- every later probe on those keys is then cascade, which is
+what the 611 bitmap diffs are; the remaining 124 are the GEOSEARCH/GEORADIUS
+family's `ASC` ordering, which 7.0.12 resolves differently from 8.10.0. The
+sorted-set and HLL families showed no difference at all against 7.0.12. The
+control that settles it: the *same* oplog against the port's real target,
+8.10.0, reports 0 unexplained differences. So this library is byte- and
+reply-compatible with Redis 8.10; behaviour that changed between 7.0 and 8.x is
+outside the contract, and a client migrating from 7.x gains the four BITOP
+operators rather than losing anything.
+
 Scope note: the harness is a Linux-native-gcc program (WSL Ubuntu 24.04, gcc
 13.3.0).
 
@@ -599,7 +617,23 @@ key too, and `zadd()` after that starts from empty in both).
 
 Bitmap: none beyond the object model. BITFIELD's offset cap is Redis' own
 `proto-max-bulk-len` default (512MB), taken as a constant because there is no
-config to read. One known, bounded leak: `bitmap_bitfield_generic()` keeps the ops
+config to read.
+
+One difference is not the kernel's but Lua's, and it bites at 2^53: a BITFIELD
+`i64`/wide-`u*` value can exceed what a LuaJIT number (a double, Lua 5.1 numeric
+model) represents exactly, and it does on both sides of the call. Writing
+`b:bitfield("set","i64",0,4611686018427387907)` stores 2^62, not 2^62+3, because
+the literal is already rounded before the facade sees it -- measured against a
+live server, Redis holds `4000000000000003` where the handle holds
+`4000000000000000`. Building the same pattern out of two exactly representable
+halves (`u32` at 0 = 2^30, `u32` at 32 = 3) produces byte-for-byte the image the
+server holds, so the kernel and the bit layout are exact and only the number
+surface rounds. Reading a wide field back rounds the same way. Callers who need
+the full 64-bit range must split the field or keep the value in `dump()`/`load()`
+bytes; `tools/redis-diff` compares such replies numerically, which is why this
+shows up as agreement there.
+
+One known, bounded leak: `bitmap_bitfield_generic()` keeps the ops
 array it is growing while it parses, and Lua errors `longjmp` out with no chance to
 free, so a malformed `BITFIELD` call that fails *after* an op was already parsed
 leaks up to ~32 bytes per op parsed so far (worst case a few hundred KB, once per

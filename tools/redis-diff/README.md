@@ -34,6 +34,20 @@ Each script starts its own server on `127.0.0.1:6399` (`PORT=` to change) and
 stops it by the PID it recorded, after checking `/proc/<pid>/cmdline`. Nothing is
 written outside `work/`, which is git-ignored.
 
+### Pointing it at a server you already run
+
+`replay_redis.py` begins by emptying the database it works in -- harmless on the
+throwaway server these scripts start, destructive anywhere else. So it takes
+`--db N` and, through `resp2.open_scratch_db()`, **refuses** when that database
+is not already empty; there is no `--force`, because deciding to wipe a database
+that holds something is a person's call, not a flag's. `interop.py` no longer
+flushes at all: both of its phases work inside four `interop:*` names and clear
+exactly those.
+
+That is how a run against a local Windows `redis-server` 7.0.12 was made safe to
+do at all: `--port 6379 --db 1`, with db0's 6278 keys never touched (verified by
+size before and after, and by deleting only the 24 keys the run created).
+
 ## What is compared
 
 `gen.lua` writes ops over four key pools (bitmap / hll / zset / geo), mixing
@@ -85,3 +99,24 @@ Anything else is an unexplained difference and makes the exit code nonzero.
 
 `REPORT-2026-10-10.md` -- what the first 3000-op run found, and the five port bugs
 it found with it.
+
+## Against an older server
+
+Seed 900001 / 4000 ops was replayed against a real `redis-server` **7.0.12** as
+well as against the 8.10.0 build this port is made from, on a byte-identical
+oplog (md5 checked). 7.0.12 reports 735 differing records where 8.10.0 reports
+0, and the 735 are version gaps, not port bugs:
+
+* `BITOP DIFF` / `DIFF1` / `ANDOR` / `ONE` are Redis 8 operations. The 7.0.12
+  side answers `ERR syntax error` on the 42 ops using them and never creates the
+  destination keys, so each later probe on those keys differs too -- that
+  cascade is what the 611 bitmap diffs consist of.
+* the GEOSEARCH / GEORADIUS family's `ASC` ordering resolves differently on
+  7.0.12; 124 records, all in that family.
+* sorted-set and HLL: no difference at all, on either side.
+
+Read this as the port's contract being Redis 8.10 specifically. If a command
+behaviour changed between 7.0 and 8.x, this library follows 8.x, and a run
+against a 7.x server will show that -- which is the useful thing about having
+the older number written down.
+
