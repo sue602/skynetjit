@@ -464,6 +464,30 @@ Redis reply shapes and the upstream error texts. It is green on both platforms:
 `build.sh` on Windows and `build-linux.sh` under WSL Ubuntu 24.04 print
 `redislib-smoke: redislib modules succeeded`.
 
+Public-surface enumeration (2026-10-11). The callable names are read off the
+built tree, not off the source registration tables: a probe service started
+inside `build/out` requires each of the four modules, `pairs()` its module table
+and the class metatable of a throwaway handle, and writes the sorted names out.
+What the built tree answers: bitmap 7 commands (6 with a handle form, BITOP
+module-only) + `dump/free/len`; hll 5, all with a handle form, plus the
+multi-object module shapes of PFCOUNT/PFMERGE/PFSELFTEST; sortedset 31 -- 26
+names have a handle form, 5 (ZUNION / ZINTER / ZDIFF / ZINTERCARD / ZMPOP) are
+module functions only, and the 4 STORE-family names are valid both ways because
+their destination is the receiver; geo 10, all with a handle form, plus
+`geo.geosearchstore(dst, src, ...)`. 53 in total, each with its upper-case alias
+on the table it lives on.
+
+That enumeration is what caught a name registered where it can never work:
+`zmpop` sat in `zset_methods` too, and since it reads its operand list as
+argument 1, `handle:zmpop()` could only fail ("table expected, got userdata").
+The class registration is gone; `tests/redislib_smoke.lua` now asserts both
+halves of the shape (`handle.zmpop == nil and handle.ZMPOP == nil`,
+`sortedset.zmpop ~= nil and sortedset.ZMPOP ~= nil`), and section 6 records
+ZMPOP as module-form-only. Re-verified after that change: `build.sh --no-sync`
+and `build-linux.sh --no-sync` both `Tests passed`, and differential seed 424242
+(4000 ops) still reports 0 unexplained differences with the same
+`no-command-table` bucket count (11).
+
 Differential check against a live server (`tools/redis-diff`, manual by design --
 it needs a second build and a running process, so it is not in the one-shot test):
 `gen.lua` writes a deterministic operation log, `replay_redis.py` runs it against
