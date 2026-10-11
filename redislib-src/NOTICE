@@ -312,7 +312,11 @@ path no redislib facade can reach.
                                                zset_max_listpack_entries 128,
                                                zset_max_listpack_value 64,
                                                memory_tracking_enabled 0;
-                                               defaults from src/config.c
+                                               defaults from src/config.c.
+                                               `server` itself is read only by
+                                               the kernels; the one value a
+                                               facade wants comes through
+                                               redislib_hll_sparse_max_bytes()
     redislibSharedStruct  (extern `shared`) -> minstring / maxstring sentinels
                                                created by redislib_init(), the
                                                zslParseLexRangeItem() unbounded
@@ -350,6 +354,18 @@ path no redislib facade can reach.
                                        neither destructor is set, so the facade
                                        frees each key once it has handed its
                                        bytes to Lua)
+    Both are `static` and reach the facade through the accessors below: the
+    facades are four separate shared objects that link one rlcore library, and
+    what crosses that boundary is deliberately only function calls (see the
+    "rlcore" paragraph of section 5).
+
+`redislib_port.c` -- cross-library accessors (authored, no upstream counterpart;
+    each returns the address of, or reads, the same object the kernels see):
+    redislib_hash_dict_type()        -> &hashDictType
+    redislib_sds_reply_dict_type()   -> &sdsReplyDictType
+    redislib_hll_sparse_max_bytes()  -> server.hll_sparse_max_bytes
+    Call sites: facade/sortedset.c (4 dictCreate) and facade/hll.c:535
+    (hllPfSelftest's sparse-encoding checkpoint).
 
 `redislib_port.c` -- abort stubs (deliberate, they must never run):
     setTypeSize(), setTypeIsMemberAux()   src/t_set.c
@@ -386,6 +402,34 @@ LF. `.gitattributes` pins `redislib-src/**` and the two redislib test files to
 `eol=lf` so the comparison works in any checkout; if a comparison ever reports
 *every* line changed, that is a line-ending artefact -- strip the CR
 (`sed 's/\r$//'`) before believing it.
+
+Build shape -- one `rlcore` library. `integration/redislib.mk` links the 21
+kernel objects into a single shared library, `rlcore.dll` (plus its MinGW import
+library `librlcore.a`) on Windows and `librlcore.so` on Linux, installed in the
+output root next to `skynet.exe` / `skynet`. The four `luaclib/redis/*.so`
+modules import their kernel calls from it instead of each carrying a private
+copy of the whole kernel: on Windows the four modules were 4,657,995 bytes
+together and are now 1,703,832 -- a 1,060,668-byte `rlcore.dll` plus 108-209 KB
+per module (on Linux, 763,304 + 478,672 bytes). The size
+was never the point though -- four copies were four `server` structs, four dict
+siphash seeds and four RNG streams, and the Windows stand-in for `random()`
+starts from a hardcoded constant, so two modules drew the *same* sequence (for
+skiplist levels and for dict sampling alike). Now the process has one of each.
+
+Only function calls cross that boundary. `nm` over the facade objects showed
+exactly three globals they read directly -- `server`, `hashDictType`,
+`sdsReplyDictType` -- and all three are defined by the authored shim rather than
+by a verbatim kernel file, so each became an accessor (section 4). Taking the
+*address* of data living in another Windows DLL is settled by the linker's
+auto-import rewriting rather than by the import table, and this port does not
+want its correctness to rest on that: `objdump -p` over the shipped modules now
+lists kernel functions -- plus those accessors, in the two modules that call
+them -- under `DLL Name: rlcore.dll`, and no data symbol at all. Re-verified
+after the split: the three seeds of the first run replayed unchanged (424242 /
+4000, 777 / 4000, 20261010 / 6000 -- 0 unexplained differences, and the same
+`no-command-table` buckets, 11 / 8 / 18), three fresh seeds replayed the same way
+(1 / 4000, 2 / 4000, 3 / 6000), `interop.sh` 15/15, and the one-shot suite green
+on both platforms in both `--redislib` and `--no-redislib` mode.
 
 `tools/redislib-harness.c` is a pure-C assertion program over the ported kernels
 (geohash encode/decode round trip and the distance helpers, HLL 10k cardinality

@@ -172,8 +172,9 @@ void *dictSdsDup(dict *d, const void *key) {
 }
 
 /* src/server.c:690 -- verbatim. ZRANDMEMBER's CASE 4 staging dict owns the
- * copies of the sampled members, so both destructors are the sds ones. */
-dictType hashDictType = {
+ * copies of the sampled members, so both destructors are the sds ones.
+ * static: reached from facade/sortedset.c through redislib_hash_dict_type(). */
+static dictType hashDictType = {
     dictSdsHash,                /* hash function */
     NULL,                       /* key dup */
     NULL,                       /* val dup */
@@ -186,8 +187,9 @@ dictType hashDictType = {
 /* src/server.c:700 -- verbatim. ZRANDMEMBER's CASE 3 staging dict hands its
  * keys straight to the reply, so it must not free them itself; the facade that
  * uses it here keeps them alive until it has pushed each one to Lua and frees
- * them itself (see facade/sortedset.c). */
-dictType sdsReplyDictType = {
+ * them itself (see facade/sortedset.c).
+ * static: reached through redislib_sds_reply_dict_type() below. */
+static dictType sdsReplyDictType = {
     dictSdsHash,                /* hash function */
     NULL,                       /* key dup */
     NULL,                       /* val dup */
@@ -196,6 +198,17 @@ dictType sdsReplyDictType = {
     NULL,                       /* val destructor */
     NULL                        /* allow to expand */
 };
+
+/* The three accessors above (redislib_port.h): the facades are separate shared
+ * objects from this library, and a data symbol imported across a Windows DLL
+ * boundary is resolved by the linker's auto-import rewriting while a function
+ * call is resolved by the import table itself. Nothing here changes a value --
+ * they return the address of the same static object, or read the same global. */
+dictType *redislib_hash_dict_type(void) { return &hashDictType; }
+
+dictType *redislib_sds_reply_dict_type(void) { return &sdsReplyDictType; }
+
+size_t redislib_hll_sparse_max_bytes(void) { return server.hll_sparse_max_bytes; }
 
 REDISLIB_NORETURN void redislib_panic(const char *msg, ...) {
     va_list ap;

@@ -52,6 +52,15 @@ include $(INTEGRATION_DIR)/integration/netbull.mk
 # redislib kernels are plain C: BASE_CFLAGS is enough (it already carries
 # -I$(SKYNET_DIR)/skynet-src for skynet_malloc.h, and -fPIC for the .so links).
 RL_CFLAGS := $(BASE_CFLAGS)
+# librlcore.so lands in $(OUT) beside libskynet.so, and finds its own imports
+# through $ORIGIN. The facades sit two levels deeper (luaclib/redis/), so their
+# rpath goes up twice -- NB_RPATH would point at $(OUT)/luaclib, which holds no
+# library at all.
+RL_CORE_SO := $(OUT)/librlcore.so
+RL_CORE_IMPLIB :=
+RL_CORE_LINK := -L$(OUT) -lrlcore
+RL_CORE_RPATH := -Wl,-rpath,'$$ORIGIN'
+RL_RPATH := -Wl,-rpath,'$$ORIGIN/../..'
 include $(INTEGRATION_DIR)/integration/redislib.mk
 
 .PHONY: all core modules tools clean print-config

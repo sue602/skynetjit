@@ -1506,7 +1506,7 @@ lzrandmember(lua_State *L) {
     /* CASE 3: the set is not much bigger than the count, so take everything
      * and remove random members until the count is left. */
     if (count*RL_ZRAND_SUB_STRATEGY_MUL > size) {
-        dict *d = dictCreate(&sdsReplyDictType);
+        dict *d = dictCreate(redislib_sds_reply_dict_type());
         rl_rand_all staging;
         dictIterator di;
         dictEntry *de;
@@ -1545,7 +1545,7 @@ lzrandmember(lua_State *L) {
     /* CASE 4: the set is big compared to the count, so sample members and keep
      * the ones not seen yet in a staging dict. */
     {
-        dict *d = dictCreate(&hashDictType);
+        dict *d = dictCreate(redislib_hash_dict_type());
         unsigned long added = 0;
 
         dictExpand(d, count);
@@ -1769,7 +1769,7 @@ rl_setop_generic(lua_State *L, int keyidx, int op, int cardinality_only,
          * score in a dict and then inserts each finished score with the
          * exported zslInsert(). Same O(sum of sizes + K log K) work, same
          * result, no copied skiplist internals. */
-        dict *agg = dictCreate(&sdsReplyDictType);
+        dict *agg = dictCreate(redislib_sds_reply_dict_type());
         dictIterator adi;
         dictEntry *ade;
 
@@ -1826,7 +1826,7 @@ rl_setop_generic(lua_State *L, int keyidx, int op, int cardinality_only,
          * operand, delete every later operand's members from the staging dict,
          * then insert what survived. Same result, same weights-ignored rule, and
          * ZDIFF takes src[0] as the minuend in both (no size sort for DIFF). */
-        dict *left = dictCreate(&sdsReplyDictType);
+        dict *left = dictCreate(redislib_sds_reply_dict_type());
         dictIterator di;
         dictEntry *de;
 

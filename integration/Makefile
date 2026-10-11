@@ -59,6 +59,15 @@ include $(INTEGRATION_DIR)/integration/netbull.mk
 # pulls windows.h, whose WORD typedef collides with Redis' sha256.h WORD.
 # (Verified: kernel objects compile standalone against MinGW.)
 RL_CFLAGS := $(BASE_CFLAGS)
+# rlcore.dll lands in $(OUT) next to skynet.exe: that directory is the first
+# place Windows looks when it resolves the imports of anything skynet loads, so
+# luaclib/redis/*.so find it without an rpath. librlcore.a is the import library
+# for -lrlcore, same shape as skynet.dll / libskynet.a.
+RL_CORE_SO := $(OUT)/rlcore.dll
+RL_CORE_IMPLIB := -Wl,--out-implib,$(OUT)/librlcore.a
+RL_CORE_LINK := -L$(OUT) -lrlcore
+RL_CORE_RPATH :=
+RL_RPATH :=
 include $(INTEGRATION_DIR)/integration/redislib.mk
 
 .PHONY: all core modules tools clean print-config

@@ -83,8 +83,8 @@ epoll。Windows 只支持 wepoll 后端。
   lfs、pb、sqlite3、zlib、zset）及其 Lua 叠加文件；Windows 下同时不下载、不编译
   zlib/libcurl/CMake 依赖，Linux 下跳过 libcurl/zlib 开发包检查。默认编译这些库；
 - `--no-redislib`：跳过 `redislib-src/` 的 Redis 8.10.0 算法内核与 4 个 Lua C 模块
-  （bitmap、hll、sortedset、geo），不产出 `luaclib/redis/*.so`，也不叠加
-  `lualib/{bitmap,hll,sortedset,geo}.lua`，一键测试里的 redislib 冒烟同样跳过。
+  （bitmap、hll、sortedset、geo），不产出内核共享库 `rlcore` 与 `luaclib/redis/*.so`，
+  也不叠加 `lualib/{bitmap,hll,sortedset,geo}.lua`，一键测试里的 redislib 冒烟同样跳过。
   默认编译，可用 `--redislib` 显式恢复；
 - `--jobs N`：设置并行编译任务数。
 
@@ -102,11 +102,13 @@ Windows 主要文件在 `build/out`：
 - `luajit.exe`、`lua51.dll`；
 - `cservice/*.so`；
 - `luaclib/*.so`；
-- `luaclib/redis/*.so`（redislib 的 4 个模块）与 `lualib/` 中的同名包装文件；
+- `luaclib/redis/*.so`（redislib 的 4 个模块）与它们共用的内核库 `rlcore.dll`，
+  以及 `lualib/` 中的同名包装文件；
 - Skynet 的 `lualib`、`service` 和 `examples`。
 
 Linux 对应文件在 `build/linux-out`，包括 `skynet`、`libskynet.so`、`luajit`、
-`libluajit.so`、`cservice/*.so`、`luaclib/*.so` 和同一套 Lua 运行时文件。
+`libluajit.so`、`cservice/*.so`、`luaclib/*.so`、redislib 的 `librlcore.so` 与
+`luaclib/redis/*.so`，以及同一套 Lua 运行时文件。
 
 从输出目录启动自己的配置，例如：
 
@@ -147,7 +149,12 @@ skynet.exe examples\config
   全部非阻塞 `Z*` 去掉 `ZSCAN`）、geo 10。内核文件只做三种机械编辑——include 换成
   本仓库的 shim、删掉 `xxxCommand(client*)` 命令层、加一行移植说明——`sds`、`dict`、
   `listpack`、`intset`、`adlist`、`t_zset`、`hyperloglog`、`bitops`、`geo`、
-  `geohash*`、`pqsort`、`util`、`crc16` 等的算法行不动。`redislib-src/NOTICE` 逐节
+  `geohash*`、`pqsort`、`util`、`crc16` 等的算法行不动。内核只编译成一份共享库
+  （Windows `rlcore.dll`、Linux `librlcore.so`），4 个模块都从这里取内核调用，不再
+  各带一份内核副本——顺带也不再各带一份 `server`、dict 种子与 RNG 流。跨这个边界的
+  只有函数：facade 原先直读的三个全局 `server`、`hashDictType`、`sdsReplyDictType`
+  改走 `redislib_port.c` 里的访问函数，因为在 Windows 上取另一个 DLL 里数据的地址
+  要靠链接器的 auto-import 改写，而不是导入表。`redislib-src/NOTICE` 逐节
   记录文件映射、shim 符号清单、与真 Redis 的偏差清单，以及许可依据：本移植按
   **内部自用**推进（Redis 源码为 AGPLv3/RSALv2/SSPLv1），若要对外分发或托管需
   重新评估。

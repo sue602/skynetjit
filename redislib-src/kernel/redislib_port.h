@@ -217,9 +217,16 @@ void *dictSdsDup(dict *d, const void *key);
 
 /* src/server.c:690 and :700: the two dictTypes the ZRANDMEMBER sampling
  * strategies need (they live in the server core upstream, so a facade cannot
- * see them). Both are the upstream definitions, verbatim. */
-extern dictType hashDictType;
-extern dictType sdsReplyDictType;
+ * see them). Both are the upstream definitions, verbatim, now static in
+ * redislib_port.c: the redislib facades are separate shared objects, and on
+ * Windows importing the *address* of a data symbol from another DLL depends on
+ * the linker's auto-import rewriting rather than on a plain call, so what
+ * crosses that boundary is these two functions instead. The same rule gives
+ * redislib_hll_sparse_max_bytes(), the one `server` field a facade reads.
+ * See NOTICE. */
+dictType *redislib_hash_dict_type(void);
+dictType *redislib_sds_reply_dict_type(void);
+size_t redislib_hll_sparse_max_bytes(void);
 
 /* ---------------------------------------------------------------------------
  * Redis configuration globals the kernels read. Defaults are the ones from
@@ -232,6 +239,8 @@ typedef struct redislibServerConfig {
     int memory_tracking_enabled;      /* slot/keysizes stats: off by default */
 } redislibServerConfig;
 
+/* Read by the kernels only; a facade goes through redislib_hll_sparse_max_bytes()
+ * for the one value it needs (see the cross-DLL note above redislib_hash_dict_type). */
 extern redislibServerConfig server;
 
 /* shared.minstring / shared.maxstring are the sentinel SDS objects that

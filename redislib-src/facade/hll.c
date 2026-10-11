@@ -532,7 +532,7 @@ lhll_pfselftest(lua_State *L) {
         hllAdd(o,(unsigned char*)&ele,sizeof(ele));
 
         if (j == (unsigned int)checkpoint &&
-            (int64_t)j < (int64_t)(server.hll_sparse_max_bytes/2)) {
+            (int64_t)j < (int64_t)(redislib_hll_sparse_max_bytes()/2)) {
             hdr2 = (struct hllhdr*)o->ptr;
             if (hdr2->encoding != HLL_SPARSE) {
                 sdsfree(bitcounters); sdsfree(o->ptr); zfree(o);
