@@ -60,17 +60,8 @@ Linux 使用独立的一键脚本，产物位于 `build/linux-out`，不与 Wind
 ./build-linux.sh
 ```
 
-默认后端是原生 epoll。Linux/WSL 上可以显式选择完成队列驱动的 io_uring 后端：
-
-```bash
-sudo apt install liburing-dev pkg-config
-./build-linux.sh --backend uring
-```
-
-该后端不是在 poll 接口上的适配层：TCP 的 accept、connect、recv、send 以及 UDP 的
-recvmsg、sendmsg 都通过 io_uring CQE 完成；控制管道仍用一个 `POLL_ADD` 请求来唤醒
-Skynet 的命令队列。若内核不能创建 io_uring，构建产物会在启动时失败，不会静默回退到
-epoll。Windows 只支持 wepoll 后端。
+默认后端是原生 epoll，也是唯一后端：Linux/WSL 用 epoll，Windows 用 wepoll 兼容层。
+（曾经有过一个可选的 io_uring 完成队列驱动后端，连同 `--backend` 选项一起移除了。）
 
 常用选项：
 
@@ -78,7 +69,6 @@ epoll。Windows 只支持 wepoll 后端。
 - `--no-sync`：不检查或切换子模块，直接使用当前已检出的提交；适合 WSL 与
   Windows 共享同一工作区时的本地验证；
 - `--no-test`：只编译，不执行测试；
-- `--backend epoll|uring`：仅 Linux 可选，默认为 `epoll`；`uring` 需要 `liburing-dev`；
 - `--no-netbull`：跳过 `luaclib-src/` 的 7 个 NetBull Lua C 库（cjson、luacurl、
   lfs、pb、sqlite3、zlib、zset）及其 Lua 叠加文件；Windows 下同时不下载、不编译
   zlib/libcurl/CMake 依赖，Linux 下跳过 libcurl/zlib 开发包检查。默认编译这些库；
@@ -127,9 +117,9 @@ skynet.exe examples\config
   通过读取线程和 loopback socketpair 接入 wepoll。
 - Windows 构建将 WinSock `FD_SETSIZE` 统一设为 65535；Skynet socket 事件循环使用
   wepoll，且一键测试会同时创建并注册 65535 个 UDP socket 验证容量。
-- Linux 默认使用 epoll，也可通过 `--backend uring` 启用独立的 completion-driven
-  io_uring socket 后端。该后端为空闲 socket 的 recv/recvmsg 使用 `POLL_FIRST`，避免一次
-  无效的直接收包尝试；补丁和实现文件只会复制到 `build/linux-work`，不会修改子模块。
+- Linux 使用原生 epoll，Windows 使用 wepoll 兼容层；两条路径都没有可选后端。补丁与
+  叠加文件只作用在一次性解包目录（Windows `build/work`、Linux `build/linux-work`），
+  不会修改子模块。
 - Win64 I/O 包装保持 POSIX 的零长度 read/recv 立即返回语义，使 `skynet.abort`
   能够处理无 payload 的退出控制命令并完成线程回收。
 - `compat/luajit` 提供 Skynet 当前 Lua 5.4 C API 到 LuaJIT 2.1 API 的适配。
@@ -185,11 +175,9 @@ protoc+pb 的 protobuf 编码解码往返。还有一项 redislib 冒烟测试�
 `dump()`/`load()` 字节互通、包装层的大写别名与表形态入参，以及 1e6 元素规模下的
 rank/range/LIMIT 精确断言；Windows 实测整套 2.3 秒，`--no-redislib` 时该项打印跳过
 说明并通过。Windows 额外验证 console stdin 命令和
-wepoll 65535-socket 容量；Linux 运行同一套运行时与退出测试。选择 `uring` 时还会验证
-TCP 和 UDP 回环往返，覆盖 accept/connect/recv/send/recvmsg/sendmsg 的完成事件路径，
-并验证 8192 个 UDP socket 的并发注册。Linux 如需把容量回归提高到 65535，可设置
-`SKYNETJIT_SOCKET_CAPACITY=65535`；这会为每个空闲 UDP socket 保留 65535-byte 接收
-缓冲区，约需 4 GiB 内存，并要求足够高的 `ulimit -n`。
+wepoll 65535-socket 容量（可用 `SKYNETJIT_SOCKET_CAPACITY` 调整，上限 65535）；Linux
+运行同一套运行时与退出测试，容量回归不在 Linux 上跑——那个回归针对的是 wepoll 在
+WSAPoll 之上的 fd 上限，epoll 没有这个问题。
 
 ## 已知边界
 
@@ -209,10 +197,6 @@ TCP 和 UDP 回环往返，覆盖 accept/connect/recv/send/recvmsg/sendmsg 的�
   不能把内部图编码当成可落盘或跨进程交换的格式。
 - LuaJIT 采用 Lua 5.1 数值模型。兼容层覆盖了 Skynet 当前源码所需接口，但依赖
   Lua 5.4 精确 64 位整数语义或 to-be-closed 变量的第三方业务代码仍需单独适配。
-- io_uring 后端当前为每个 socket 保留一个在途 read/connect 请求和一个有序写请求；监听
-  socket 使用 multishot accept，大于等于 64 KiB 的 TCP 写入使用 send zerocopy；两者在
-  内核不支持时分别自动退回普通 io_uring accept/send。这保持了 Skynet 的消息顺序与关闭
-  语义；read 的 multishot、buffer selection 和注册缓冲区等更激进的内核特性尚未启用。
 - redislib 移植的是 Redis 的**数据结构与算法**，不是它的服务器：没有 keyspace、
   DB、TTL、主从复制与 AOF，因此也没有 `SCAN`/`ZSCAN` 与阻塞族
   （`BZPOPMIN`/`BZPOPMAX`/`BZMPOP`）；对象是 Lua handle，命令打在 handle 上。

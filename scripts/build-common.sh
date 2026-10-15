@@ -4,7 +4,6 @@
 parse_build_options() {
 	SYNC_MODE=update
 	RUN_TESTS=1
-	SOCKET_BACKEND=epoll
 	NETBULL=1
 	REDISLIB=1
 	JOBS=${NUMBER_OF_PROCESSORS:-2}
@@ -20,11 +19,6 @@ parse_build_options() {
 			--netbull) NETBULL=1 ;;
 			--no-redislib) REDISLIB=0 ;;
 			--redislib) REDISLIB=1 ;;
-			--backend)
-				shift
-				[ "$#" -gt 0 ] || { echo "--backend needs a value" >&2; exit 2; }
-				SOCKET_BACKEND=$1
-				;;
 			--jobs)
 				shift
 				[ "$#" -gt 0 ] || { echo "--jobs needs a value" >&2; exit 2; }
@@ -38,10 +32,6 @@ parse_build_options() {
 	case "$JOBS" in
 		''|*[!0-9]*|0) echo "--jobs must be a positive integer" >&2; exit 2 ;;
 	esac
-	case "$SOCKET_BACKEND" in
-		epoll|uring) ;;
-		*) echo "--backend must be epoll or uring" >&2; exit 2 ;;
-	esac
 }
 
 common_usage() {
@@ -50,7 +40,6 @@ Options:
   --offline       Use recorded submodule revisions without fetching updates.
   --no-sync       Use the already checked-out revisions without changing them.
   --no-test       Build only; skip smoke and Lua syntax tests.
-  --backend NAME  Linux socket backend: epoll (default) or uring.
   --no-netbull    Skip the vendored NetBull luaclib set (cjson, luacurl, lfs,
                   pb, sqlite3, zlib, zset) and its dependency downloads.
   --netbull       Build the NetBull luaclib set (default).
@@ -110,10 +99,6 @@ prepare_sources() {
 	fi
 	if [ "${REDISLIB:-1}" = 1 ]; then
 		cp -a "$ROOT_DIR/redislib-src/lua/." "$WORK_DIR/skynet/lualib/"
-	fi
-	if [ "$SOCKET_BACKEND" = uring ]; then
-		cp "$ROOT_DIR/compat/linux/socket_uring.h" "$WORK_DIR/skynet/skynet-src/"
-		cp "$ROOT_DIR/compat/linux/socket_uring.inc" "$WORK_DIR/skynet/skynet-src/"
 	fi
 }
 

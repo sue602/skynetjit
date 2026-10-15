@@ -4,17 +4,6 @@ SKYNET_DIR ?= .
 LUAJIT_DIR ?= ../luajit2
 OUT ?= ../out
 INTEGRATION_DIR ?= ../..
-SOCKET_BACKEND ?= epoll
-
-ifeq ($(SOCKET_BACKEND),uring)
-BACKEND_CFLAGS := -DSKYNETJIT_USE_IO_URING $(shell pkg-config --cflags liburing 2>/dev/null)
-BACKEND_LIBS := $(shell pkg-config --libs liburing 2>/dev/null)
-else ifeq ($(SOCKET_BACKEND),epoll)
-BACKEND_CFLAGS :=
-BACKEND_LIBS :=
-else
-$(error SOCKET_BACKEND must be epoll or uring)
-endif
 
 COMPAT_LUA := $(INTEGRATION_DIR)/compat/luajit
 LUAJIT_SRC := $(LUAJIT_DIR)/src
@@ -23,7 +12,7 @@ CSERVICE_DIR := $(OUT)/cservice
 LUA_CLIB_DIR := $(OUT)/luaclib
 OBJ_DIR := $(OUT)/obj
 
-BASE_CFLAGS := -g -O2 -Wall -std=gnu99 -fno-strict-aliasing -fPIC $(BACKEND_CFLAGS) \
+BASE_CFLAGS := -g -O2 -Wall -std=gnu99 -fno-strict-aliasing -fPIC \
 	-I$(LUAJIT_SRC) -I$(SKYNET_DIR)/skynet-src
 BASE_CFLAGS += -Wno-unused-function -Wno-unused-parameter
 LUA_FORCE := -include $(COMPAT_LUA)/lua54_compat.h
@@ -79,7 +68,6 @@ print-config:
 	@echo SKYNET_DIR=$(SKYNET_DIR)
 	@echo LUAJIT_DIR=$(LUAJIT_DIR)
 	@echo OUT=$(OUT)
-	@echo Linux socket backend: $(SOCKET_BACKEND)
 
 $(OUT) $(OBJ_DIR) $(CSERVICE_DIR) $(LUA_CLIB_DIR):
 	mkdir -p $@
@@ -88,7 +76,7 @@ $(SKYNET_SO): $(addprefix $(SKYNET_DIR)/skynet-src/,$(SKYNET_SRC)) \
 	$(LUAJIT_SRC)/libluajit.so | $(OUT)
 	$(CC) $(SKYNET_CFLAGS) $(SHARED) -o $@ \
 		$(addprefix $(SKYNET_DIR)/skynet-src/,$(SKYNET_SRC)) \
-		$(LUA_LIBS) $(SYSTEM_LIBS) $(BACKEND_LIBS) -DNOUSE_JEMALLOC
+		$(LUA_LIBS) $(SYSTEM_LIBS) -DNOUSE_JEMALLOC
 
 $(SKYNET_BIN): $(SKYNET_DIR)/skynet-src/skynet_main.c $(SKYNET_SO) | $(OUT)
 	$(CC) $(SKYNET_CFLAGS) -o $@ $< \
