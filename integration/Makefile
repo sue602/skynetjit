@@ -26,6 +26,14 @@ BASE_CFLAGS := -g -O2 -Wall -std=gnu99 -fno-strict-aliasing \
 BASE_CFLAGS += -Wno-unused-function -Wno-unused-parameter \
 	-Wno-deprecated-declarations
 
+# skynet 在这份 fork 里把 skynet_malloc 直接宏到 CRT malloc，malloc_hook.c 的
+# 按服务记账因此整条编译不出去。ALLOC_HOOKS=1（默认）让它走真函数，后端见
+# compat/common/skynetjit_alloc.h；--no-alloc-hooks 回到上游那份宏的样子。
+ALLOC_HOOKS ?= 1
+ifeq ($(ALLOC_HOOKS),1)
+BASE_CFLAGS += -DSKYNETJIT_ALLOC_WRAPPED
+endif
+
 WIN_FORCE := -include $(COMPAT_WIN)/compat.h
 LUA_FORCE := -include $(COMPAT_LUA)/lua54_compat.h
 SKYNET_CFLAGS := $(BASE_CFLAGS) $(WIN_FORCE) $(LUA_FORCE)

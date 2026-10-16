@@ -19,6 +19,7 @@ parse_build_options() {
 	RUN_TESTS=1
 	NETBULL=1
 	REDISLIB=1
+	ALLOC_HOOKS=1
 	JOBS=${NUMBER_OF_PROCESSORS:-2}
 	if command -v nproc >/dev/null 2>&1; then
 		JOBS=$(nproc)
@@ -32,6 +33,7 @@ parse_build_options() {
 			--netbull) NETBULL=1 ;;
 			--no-redislib) REDISLIB=0 ;;
 			--redislib) REDISLIB=1 ;;
+			--no-alloc-hooks) ALLOC_HOOKS=0 ;;
 			--jobs)
 				shift
 				[ "$#" -gt 0 ] || { echo "--jobs needs a value" >&2; exit 2; }
@@ -59,6 +61,11 @@ Options:
   --no-redislib   Skip the redislib set (Redis 8.10.0 bitmap/geo/hll/sortedset
                   kernels under redislib-src/ and luaclib/redis/*.so).
   --redislib      Build the redislib set (default).
+  --no-alloc-hooks
+                  Keep upstream's skynet_malloc macros instead of routing
+                  skynet's allocations through the hooks in malloc_hook.c.
+                  With it, skynet.memory, debug_console's mem and the launcher's
+                  MEM read 0 because nothing ever reaches the accounting.
   --jobs N        Parallel build jobs (defaults to CPU count).
   --help          Show this help.
 USAGE
@@ -113,6 +120,9 @@ prepare_sources() {
 	if [ "${REDISLIB:-1}" = 1 ]; then
 		cp -a "$ROOT_DIR/redislib-src/lua/." "$WORK_DIR/skynet/lualib/"
 	fi
+	# The allocator header is always copied: skynet_malloc.h includes it whenever
+	# SKYNETJIT_ALLOC_WRAPPED is defined, and that define is on by default.
+	cp "$ROOT_DIR/compat/common/skynetjit_alloc.h" "$WORK_DIR/skynet/skynet-src/"
 }
 
 copy_runtime_lua() {

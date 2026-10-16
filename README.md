@@ -180,7 +180,51 @@ skynet.exe examples\config
   `--offline` 时若缓存不存在会直接报错提示先联网构建一次。
 - Linux 构建的 `luacurl.so`/`zlib.so` 直接链接系统 libcurl 与 zlib，需要
   `libcurl4-openssl-dev` 和 `zlib1g-dev`；`build-linux.sh` 会提前检查并给出提示。
-- 构建使用 `NOUSE_JEMALLOC`，所以不需要初始化 Skynet 的 jemalloc 子模块。
+- 分配与内存统计：上游把 `skynet_malloc` 等七个入口直接宏到 CRT `malloc`（这份
+  fork 里连 `skynet_malloc.c` 都没有），于是 `malloc_hook.c` 的 cookie 与按服务记账
+  整条编译不出去。实测就是：`skynet.memory` 的 `total`/`current`/`block`、
+  `debug_console` 的 `mem`、launcher 的 `MEM` 一律读 0，哪怕手里正握着一条 4 MB 的
+  消息缓冲区。默认构建（`ALLOC_HOOKS=1`）用 `patches/skynet-luajit.patch` 的一节让
+  宏让位给真函数，并把 `malloc_hook.c` 中原本只服务于 jemalloc 的那一支的 `je_*`
+  映射到 `compat/common/skynetjit_alloc.h` 的七个后端宏——同一套 cookie 与计数器直接
+  复用，换分配器只需要改那一个文件。`NOUSE_JEMALLOC` 照旧生效，所以仍然不需要
+  jemalloc 子模块。`--no-alloc-hooks` 回到上游那份宏的样子。后端为 libc 时
+  `skynet.memory` 的 `jestat`/`dumpinfo`/`dumpheap`/`profactive` 读作"不可用"，
+  它们依赖 jemalloc 的 `mallctl`。Lua VM 的分配走 `skynet_lalloc`（`realloc`/`free`），
+  它一直不是宏、也一直不记账，这是上游既有语义，本仓库没有改。
+  实测（WSL Ubuntu 24.04，默认构建）：启动后 `total=11149707 B`、`block=56`；4 MB
+  消息在接收服务的 handler 内 `current=4206628 B`，返回后落回 17 B；`info()` 从
+  0 项变成 8 项、合计 10888 KB。Windows 侧同一条探针给出逐字节相同的结果，
+  rlcore 里那个 12288 字节的稠密 HLL 也被算进当前服务的 `live=12380 B`，
+  说明跨模块（facade → rlcore → libskynet）的分配同样接上了。
+
+  记账不是免费的。`tests/alloc_bench.lua` 单次运行的 `pack`/`trash`（一次
+  `skynet_malloc`/`skynet_free` 往返）吞吐：
+
+  | | 开钩（默认） | `--no-alloc-hooks` |
+  | --- | --- | --- |
+  | Linux，4 KB 消息 | 348k–364k ops/s | 603k ops/s |
+  | Linux，64 B 消息 | 7.7M–8.8M ops/s | 12.3M ops/s |
+  | Windows，4 KB 消息 | 241k–276k ops/s | 566k ops/s |
+  | Windows，64 B 消息 | 4.2M–4.7M ops/s | 7.9M ops/s |
+
+  即消息路径大约慢 1.7x（Linux）到 2x（Windows）；换成绝对值，一条 4 KB 消息
+  的打包加释放是 2.9 µs 而不是 1.7 µs。其余几条循环在这台机器上两次运行能差
+  30%，不足以支撑任何结论——要在目标机上重测再看。
+- 对齐分配的三个入口（`skynet_memalign`、`skynet_aligned_alloc`、
+  `skynet_posix_memalign`）在本仓库没有任何调用点（`skynet-src`、`service-src`、
+  `lualib-src`、`redislib-src`、`luaclib-src` 全 grep 过，只剩声明与定义）。Linux 上
+  它们映射到 `posix_memalign`（其结果本来就能 `free`）；Windows 上 CRT 只有
+  `_aligned_malloc`，而它必须配 `_aligned_free`，接不进唯一的 `skynet_free`，所以
+  调用即显式中止，而不是留一个哪天会踩的假实现。
+- 分配器基准：`tests/alloc_bench.lua` + `tests/alloc-bench-config.lua`，量三条路——
+  `pack`/`trash`（一次 `skynet_malloc`/`skynet_free` 往返）、VM 侧表分配、rlcore 的
+  HLL 分配。它不进一键测试（对调度噪声敏感），比的是同一台机器上不同构建的相对差值：
+
+  ```bash
+  ./build-linux.sh && cd build/linux-out && ./skynet ../../tests/alloc-bench-config.lua
+  ./build-linux.sh --no-alloc-hooks && cd build/linux-out && ./skynet ../../tests/alloc-bench-config.lua
+  ```
 
 一键测试会验证 LuaJIT 环境、核心 Lua C 模块、所有 Lua 文件语法，并真正启动
 Skynet，验证 sharetable 的循环图、重复引用、函数、lightuserdata、只读保护和热更新，

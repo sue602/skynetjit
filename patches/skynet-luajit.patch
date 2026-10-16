@@ -89,3 +89,63 @@ diff --git a/lualib-src/lua-crypt.c b/lualib-src/lua-crypt.c
 +	lua_remove(L, -2);
  	return 1;
  }
+diff --git a/skynet-src/malloc_hook.c b/skynet-src/malloc_hook.c
+--- a/skynet-src/malloc_hook.c
++++ b/skynet-src/malloc_hook.c
+@@ -45,9 +45,26 @@ get_mem_stat(uint32_t handle) {
+ 	return data;
+ }
+ 
+-#ifndef NOUSE_JEMALLOC
++#if !defined(NOUSE_JEMALLOC) || defined(SKYNETJIT_ALLOC_WRAPPED)
+ 
++#ifndef NOUSE_JEMALLOC
+ #include "jemalloc.h"
++#else
++/* skynetjit: accounting on, backend chosen by compat/common/skynetjit_alloc.h.
++ * This branch was written against jemalloc's je_* prefixed API; aliasing je_* to
++ * the backend macros reuses the same cookie layout and per-handle counters
++ * instead of copying them. The two stats entry points have no backend
++ * independent equivalent, so they read as "not available". */
++#define je_malloc SKYNETJIT_MALLOC
++#define je_calloc SKYNETJIT_CALLOC
++#define je_free SKYNETJIT_FREE
++#define je_realloc SKYNETJIT_REALLOC
++#define je_memalign SKYNETJIT_MEMALIGN
++#define je_aligned_alloc SKYNETJIT_ALIGNED_ALLOC
++#define je_posix_memalign SKYNETJIT_POSIX_MEMALIGN
++#define je_malloc_stats_print(opts, unused, opaque) ((void)0)
++#define je_mallctl(name, ptr, oldlenp, newptr, oldlen) (0)
++#endif
+ 
+ // for skynet_lalloc use
+ #define raw_realloc je_realloc
+diff --git a/skynet-src/skynet_malloc.h b/skynet-src/skynet_malloc.h
+--- a/skynet-src/skynet_malloc.h
++++ b/skynet-src/skynet_malloc.h
+@@ -3,6 +3,14 @@
+ 
+ #include <stddef.h>
+ 
++#ifdef SKYNETJIT_ALLOC_WRAPPED
++/* The macros below are what makes skynet's own allocation hooks dead: every
++ * skynet_malloc() call site compiles to malloc() and never reaches the cookie
++ * and per-service accounting in malloc_hook.c. Defining SKYNETJIT_ALLOC_WRAPPED
++ * keeps the prototypes as the real entry points they are upstream, and
++ * compat/common/skynetjit_alloc.h decides who owns the heap. */
++#include "skynetjit_alloc.h"
++#else
+ #define skynet_malloc malloc
+ #define skynet_calloc calloc
+ #define skynet_realloc realloc
+@@ -10,6 +18,10 @@
+ #define skynet_memalign memalign
+ #define skynet_aligned_alloc aligned_alloc
+ #define skynet_posix_memalign posix_memalign
++#endif
++
++/* skynet_lalloc was never a macro here, so the Lua VM's allocator already
++ * reaches the backend through malloc_hook.c's raw_realloc/raw_free. */
+ 
+ void * skynet_malloc(size_t sz);
+ void * skynet_calloc(size_t nmemb,size_t size);
