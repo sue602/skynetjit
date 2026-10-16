@@ -74,7 +74,8 @@ else
 	echo "NetBull luaclib set not built; skipping its smoke test."
 fi
 if [ -f luaclib/redis/bitmap.so ] && [ -f luaclib/redis/hll.so ] &&
-   [ -f luaclib/redis/sortedset.so ] && [ -f luaclib/redis/geo.so ]; then
+   [ -f luaclib/redis/sortedset.so ] && [ -f luaclib/redis/geo.so ] &&
+   [ -f luaclib/redis/set.so ]; then
 	echo "Running redislib smoke test..."
 	rm -f redislib-smoke.ok
 	run_skynet_exit_test "$TEST_DIR/redislib-config.lua" redislib-smoke.log

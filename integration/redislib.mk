@@ -86,7 +86,7 @@ $(RL_OBJ_DIR)/%.o: $(RL_FACADE)/%.c | $(OBJ_DIR)
 	$(CC) $(RL_CFLAGS) -I$(RL_KERNEL) -I$(RL_FACADE) -c $< -o $@
 
 # Facade modules land in the redis/ sub namespace: luaclib/redis/{bitmap,geo,
-# hll,sortedset}.so, required as "redis.bitmap" and friends (same precedent as
+# hll,sortedset,set}.so, required as "redis.bitmap" and friends (same precedent as
 # NetBull's luaclib/skiplist/c.so).
 $(LUA_CLIB_DIR)/redis:
 	mkdir -p $@
@@ -104,6 +104,6 @@ $(LUA_CLIB_DIR)/redis/%.so: $(RL_FACADE)/%.c $(RL_OBJ_DIR)/rl_common.o $(RL_CORE
 
 # LUA_CLIB entries are appended by the facade tasks themselves, one per module
 # as it becomes available:
-LUA_CLIB += redis/bitmap redis/hll redis/sortedset redis/geo
+LUA_CLIB += redis/bitmap redis/hll redis/sortedset redis/geo redis/set
 
 endif

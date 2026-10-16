@@ -138,16 +138,37 @@ robj *createObject(int type, void *ptr);
 robj *createZsetObject(void);
 robj *createZsetListpackObject(void);
 
-/* src/server.h:3195: the dictType of a skiplist-encoded zset. Defined by the
- * ported t_zset.c, referenced by the object factories above. */
-extern dictType zsetDictType;
+/* src/object.c:464, :471, :478, :566 and :906: the same story for the SET type
+ * -- t_set.c creates and releases its payloads through these object.c entry
+ * points, so they are ported verbatim into redislib_port.c too. freeSetObject()
+ * releases the payload of a set object but not the robj itself (t_set.c:107 and
+ * :548 rely on that), and isSdsRepresentableAsLongLong() is what setTypeCreate()
+ * asks before choosing the intset encoding. */
+robj *createSetObject(void);
+robj *createIntsetObject(void);
+robj *createSetListpackObject(void);
+void freeSetObject(robj *o);
+int isSdsRepresentableAsLongLong(sds s, long long *llval);
 
-/* src/t_set.c:483 and :303: the SET type API. SET objects are not part of this
- * port (a redislib object is a bitmap, an HLL, or a zset), but the zunion/
- * zdiff helper block of t_zset.c still references them, so redislib_port.c
- * provides deliberate abort stubs. */
-unsigned long setTypeSize(const robj *subject);
-int setTypeIsMemberAux(robj *set, char *str, size_t len, int64_t llval, int str_is_sds);
+/* src/server.h:3195 / :3193: the dictTypes of a skiplist-encoded zset and of a
+ * hashtable-encoded set. zsetDictType is defined by the ported t_zset.c;
+ * setDictType is the server.c object ported into redislib_port.c (it is server
+ * core, not a kernel file). Both are referenced from inside this library only --
+ * t_zset.c / t_set.c and the factories above -- and a facade must reach either
+ * through a function, never by taking the address of one of these data symbols
+ * across the rlcore boundary (NOTICE 5). */
+extern dictType zsetDictType;
+extern dictType setDictType;
+
+/* src/server.c:633 setDictType's two callbacks and server.h:4030's one-line
+ * helper over dictMetadata(), which the ported dict.h provides. t_set.c uses
+ * htGetMetadataSize() at its 151 / 182 / 228 / 500 / 544 to keep a set dict's
+ * metadata counter of its element bytes; with setDictType installed a ported
+ * dictType now does carry a metadata size, which is why setSdsDestructor and
+ * setDictMetadataBytes are in redislib_port.c (NOTICE 4). */
+static inline size_t *htGetMetadataSize(dict *d) {
+    return (size_t *)dictMetadata(d);
+}
 
 /* Object type and encoding constants, copied verbatim from
  * src/server.h:875-901 and src/object.h:75-90 (values must not drift). */
@@ -234,6 +255,9 @@ size_t redislib_hll_sparse_max_bytes(void);
  * ------------------------------------------------------------------------- */
 typedef struct redislibServerConfig {
     size_t hll_sparse_max_bytes;      /* config.c:3497 "hll-sparse-max-bytes" */
+    size_t set_max_intset_entries;    /* config.c:3489 "set-max-intset-entries" */
+    size_t set_max_listpack_entries;  /* config.c:3490 "set-max-listpack-entries" */
+    size_t set_max_listpack_value;    /* config.c:3491 "set-max-listpack-value" */
     size_t zset_max_listpack_entries; /* config.c:3492 "zset-max-listpack-entries" */
     size_t zset_max_listpack_value;   /* config.c:3496 "zset-max-listpack-value" */
     int memory_tracking_enabled;      /* slot/keysizes stats: off by default */
@@ -290,6 +314,10 @@ void redislib_srandom(unsigned int seed);
 /* Sorted-set / skiplist types and kernel API, extracted verbatim from
  * src/server.h (see redislib-src/NOTICE). Needs robj, sds and dict above. */
 #include "t_zset.h"
+
+/* Set types and kernel API, the same block out of the same server.h. Needs
+ * robj, sds, dict and intset (via dict.h / the leaf headers above). */
+#include "t_set.h"
 
 /* One-time process setup, run automatically from a library constructor and
  * callable from the facades: initializes the monotonic clock used by

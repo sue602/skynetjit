@@ -26,12 +26,14 @@ local bitmap = require "bitmap"
 local hll = require "hll"
 local sortedset = require "sortedset"
 local geo = require "geo"
+local set = require "set"
 
 -- An empty Lua table encodes as `{}` here (this cjson build has no
 -- encode_empty_table_as_object), while the server's empty ZRANGE is `[]`. diff.py
 -- treats `{}` and `[]` as the same empty sequence, which is the only reason the
 -- two encodings ever have to meet.
-local NEW = { bitmap = bitmap.new, hll = hll.new, zset = sortedset.new, geo = geo.new }
+local NEW = { bitmap = bitmap.new, hll = hll.new, zset = sortedset.new, geo = geo.new,
+              set = set.new }
 
 local handles = {}
 local names = {}          -- handle -> logical name, for replies that carry one
@@ -162,10 +164,49 @@ function CALL.geo(op)
 	return h[op.cmd](h, unpack(args_of(op.args)))
 end
 
+-- The class metatable, taken off a throwaway handle: a method reached through it
+-- checks its receiver's kind and answers Redis' WRONGTYPE. Reaching the same
+-- function off the handle (`h[cmd]`) cannot work for the records whose `key` names a
+-- key of another type -- a bitmap userdata has no `sadd` field to find, so the call
+-- would die in Lua instead of answering what a server answers. Same shape as
+-- tests/redislib_smoke.lua's set section.
+local set_class = getmetatable(set.new())
+
+function CALL.set(op)
+	local args, cmd = op.args, op.cmd
+	if cmd == "sunion" or cmd == "sinter" or cmd == "sdiff" then
+		-- the read forms. Their operand list is flat, not nested the way ZUNION's is,
+		-- because the wire form of these three is the original `SINTER key [key ...]`
+		-- with no numkeys to insert: `key` is the first operand and `args` the rest.
+		local srcs = handle_list("set", args)
+		table.insert(srcs, 1, handle_for("set", op.key))
+		return set[cmd](srcs)
+	end
+	if cmd == "sintercard" or cmd == "sunioncard" or cmd == "sdiffcard" then
+		-- The only shape the log can carry for these three is the operand list that
+		-- is empty on both sides of the call; gen.lua's BAD table says why their
+		-- answers are compared by interop.sh instead.
+		return set[cmd](handle_list("set", args[1] or {}))
+	end
+	if cmd == "smove" then
+		-- the receiver is the source and the destination is argument 1, which is how
+		-- the wire form reads too; the reply is 0 or 1, never a name, so unlike
+		-- zmpop's there is nothing to substitute here
+		return set.smove(handle_for("set", op.key), handle_for("set", args[1]), args[2])
+	end
+	return set_class[cmd](handle_for("set", op.key), unpack(args_of(args)))
+end
+
 -- The state snapshot uses only commands that exist on both sides. A geoset is a
 -- sorted set, so its probe loads its own blob into a sorted-set handle and reads
 -- that: the same flat member/score list as the server's ZRANGE ... WITHSCORES, and
 -- it exercises spec 4's load() on the way.
+--
+-- The set family has no branch here on purpose: no set record asks for a probe.
+-- `GET`/`BITCOUNT`, `PFCOUNT` and `ZRANGE`/`ZCARD` are what the other side of that
+-- comparison answers for a set key, and all three are a WRONGTYPE; the set's own
+-- reads (SCARD, SMEMBERS, SISMEMBER, SMISMEMBER) are generated as ordinary records
+-- instead, which is the same information through a command both sides have.
 local function probe(op)
 	local class, key = op.class, op.key
 	local h = handles[key]

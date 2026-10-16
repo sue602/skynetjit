@@ -918,11 +918,246 @@ local function test_geo()
 	collectgarbage("collect")
 end
 
+-- The set family: SADD SREM SCARD SISMEMBER SMISMEMBER SMEMBERS SMOVE SPOP
+-- SRANDMEMBER SUNION SINTER SDIFF SUNIONCARD SINTERCARD SDIFFCARD. SSCAN is not
+-- here because ZSCAN is not in sortedset either: scanning walks a keyspace, and a
+-- redislib object is a handle (spec §3.3, NOTICE §6). Every reply below is the
+-- quantity a live server answers; where Redis answers an *unordered* set the
+-- assertion compares one too, and where it does answer in a documented order (an
+-- intset payload) that order is asserted.
+local function test_set()
+	local set = require "set"
+
+	-- ---- SADD / SCARD / SISMEMBER / SMISMEMBER / SMEMBERS ------------------
+	local s = set.new()
+	assert(s:scard() == 0)                     -- an untouched handle is no value
+	assert(s:sadd("a", "b", "c") == 3)
+	assert(s:sadd("a") == 0)                   -- already a member
+	assert(s:sadd("a", "z") == 1)              -- a partial answer is still counted
+	assert(s:scard() == 4)
+	assert(s:sismember("a") == 1 and s:sismember("z") == 1 and s:sismember("nope") == 0)
+	local ms = s:smembers()
+	assert(#ms == 4)
+	local as_set = {}
+	for _, v in ipairs(ms) do as_set[v] = true end
+	assert(as_set.a and as_set.b and as_set.c and as_set.z and #ms == 4)
+	local mm = s:smismember("a", "nope", "z")
+	assert(#mm == 3 and mm[1] == 1 and mm[2] == 0 and mm[3] == 1)
+
+	-- integer members live in an intset, which is iterated in ascending value order,
+	-- and each one replies as its decimal text -- both are Redis' own behaviour.
+	local n = set.new()
+	assert(n:sadd(1, 2, "3") == 3)
+	assert(n:smembers()[1] == "1" and table.concat(n:smembers(), ",") == "1,2,3")
+	assert(n:sismember("1") == 1 and n:sismember(1) == 1)   -- one member, both shapes
+	assert(n:srem("3", "nope") == 1)
+	assert(n:scard() == 2)
+	-- emptying an answer-staying handle: SCARD reads 0, exactly what a server answers
+	-- for the key it deleted, and the next SADD starts from nothing.
+	assert(n:srem("1", "2") == 2 and n:scard() == 0)
+	assert(n:sadd("x") == 1 and n:smembers()[1] == "x")
+
+	-- ---- SMOVE: the receiver is the source, the destination is argument 1 ---
+	local src = set.new(); src:sadd("a", "b")
+	local dst = set.new()
+	assert(src:smove(dst, "a") == 1)
+	assert(src:scard() == 1 and dst:scard() == 1 and dst:smembers()[1] == "a")
+	assert(src:smove(dst, "notamember") == 0)   -- nothing moved, nothing created
+	assert(dst:scard() == 1)
+	assert(src:smove(src, "b") == 1)            -- src == dst: a no-op that answers membership
+	assert(src:smove(src, "nope") == 0)
+	assert(src:smove(dst, "b") == 1 and src:scard() == 0)
+	-- an empty source is the key that is not there: Redis returns 0 before it looks
+	-- at the destination, so a destination of another type is not a WRONGTYPE here.
+	assert(set.new():smove(require("bitmap").new(), "x") == 0)
+
+	-- ---- SPOP ---------------------------------------------------------------
+	local p = set.new(); p:sadd("only")
+	assert(p:spop() == "only")
+	assert(p:scard() == 0)
+	assert(p:spop() == false)                    -- nothing to pop: Redis answers nil
+	assert(p:srandmember() == false)
+	assert(#p:spop(3) == 0 and #p:srandmember(3) == 0)
+	local q = set.new(); q:sadd("a", "b", "c", "d", "e")
+	local popped = q:spop(2)
+	assert(#popped == 2 and q:scard() == 3)
+	local left = {}
+	for _, v in ipairs(q:smembers()) do left[v] = true end
+	for _, v in ipairs(popped) do assert(not left[v]) end  -- what went out is gone
+	assert(#q:spop(0) == 0 and q:scard() == 3)
+	assert(#q:spop(10) == 3 and q:scard() == 0)           -- count >= size: the whole set
+	-- the "draw what STAYS" strategy: 35 of 40 out, 5 left, nothing duplicated
+	local big = set.new()
+	for i = 1, 40 do big:sadd("m" .. i) end
+	local many = big:spop(35)
+	assert(#many == 35 and big:scard() == 5)
+	local all = {}
+	for _, v in ipairs(many) do assert(not all[v]); all[v] = true end
+	for _, v in ipairs(big:smembers()) do assert(not all[v]) end
+	-- an integer payload pops integers, and each reply is its decimal text; which of
+	-- the two comes first is intsetRandom()'s own draw, so both are collected here.
+	local pi = set.new(); pi:sadd(5, 6)
+	local pis = { pi:spop(), pi:spop() }
+	local piset = {}
+	assert(pi:scard() == 0)
+	for _, v in ipairs(pis) do piset[v] = true end
+	assert(piset["5"] and piset["6"])
+
+	-- ---- SRANDMEMBER --------------------------------------------------------
+	local r = set.new(); r:sadd("a", "b", "c")
+	local one = r:srandmember()
+	assert(one == "a" or one == "b" or one == "c")
+	assert(#r:srandmember(0) == 0)
+	local whole = r:srandmember(5)               -- count >= size: every member, once
+	assert(#whole == 3)
+	local wset = {}
+	for _, v in ipairs(whole) do assert(not wset[v]); wset[v] = true end
+	assert(wset.a and wset.b and wset.c)
+	assert(#r:srandmember(-4) == 4)              -- negative: samples with replacement
+	local reps = {}
+	for _, v in ipairs(r:srandmember(-40)) do reps[v] = (reps[v] or 0) + 1 end
+	assert(reps.a and reps.b and reps.c)         -- every member is reachable
+	assert(#set.new():srandmember(3) == 0)
+	assert(set.new():srandmember() == false)
+	-- the listpack sampler: a set of short strings that fits a listpack is sampled
+	-- through it, unique and in payload order (upstream's CASE 2.5)
+	local lps = set.new()
+	for i = 1, 20 do lps:sadd("k" .. i) end
+	local uniq = lps:srandmember(7)
+	assert(#uniq == 7)
+	local uq = {}
+	for _, v in ipairs(uniq) do assert(not uq[v]); uq[v] = true end
+	-- ---- SUNION / SINTER / SDIFF and the cardinality forms ------------------
+	local u1 = set.new(); u1:sadd("a", "b", "c")
+	local u2 = set.new(); u2:sadd("c", "d")
+	assert(#set.sunion({u1, u2}) == 4)
+	assert(#set.sinter({u1, u2}) == 1 and set.sinter({u1, u2})[1] == "c")
+	assert(#set.sdiff({u1, u2}) == 2)
+	assert(#set.sdiff({u2, u1}) == 1 and set.sdiff({u2, u1})[1] == "d")
+	assert(#set.sdiff({u1, u1}) == 0)            -- one of the subtrahends IS the minuend
+	assert(set.sintercard({u1, u2}) == 1)
+	assert(set.sunioncard({u1, u2}) == 4)
+	assert(set.sdiffcard({u1, u2}) == 2)
+	assert(set.sintercard({u1, u2}, "limit", 1) == 1)
+	assert(set.sintercard({u1, u2}, "limit", 0) == 1)     -- 0 means unlimited
+	assert(set.sdiffcard({u1, u2}, "LIMIT", 1) == 1)      -- option word is case-free
+	assert(set.sintercard({u1, set.new()}) == 0)
+	-- an untouched handle is the key a server would not find: it makes SINTER empty
+	-- and is skipped by SUNION / SDIFF
+	assert(#set.sinter({u1, set.new()}) == 0)
+	assert(#set.sunion({u1, set.new()}) == 3)
+	assert(#set.sdiff({u1, set.new()}) == 3)
+	-- one operand: SINTER/SUNION/SDIFF of one set is that set
+	assert(#set.sunion({u1}) == 3 and set.sunioncard({u1}) == 3)
+	assert(#set.sdiff({u1}) == 3 and #set.sinter({u1}) == 3)
+
+	-- ---- the intset / hashtable algorithm paths -----------------------------
+	local e1 = set.new(); for i = 1, 50 do e1:sadd(i) end
+	local e2 = set.new(); for i = 40, 80 do e2:sadd(i) end
+	assert(set.sintercard({e1, e2}) == 11)              -- 40..50 inclusive
+	assert(set.sdiffcard({e1, e2}) == 39)
+	assert(set.sunioncard({e1, e2}) == 80)
+	-- all-intset operands leave an intset result, so its order is ascending values
+	local ediff = set.sdiff({e1, e2})
+	assert(#ediff == 39 and ediff[1] == "1" and ediff[39] == "39")
+	local eun = set.sunion({e1, e2})
+	assert(#eun == 80 and eun[1] == "1" and eun[80] == "80")
+	local eint = set.sinter({e1, e2})
+	assert(#eint == 11 and eint[1] == "40" and eint[11] == "50")
+	-- SINTERCARD with a limit stops early: the count it reaches is the limit
+	assert(set.sintercard({e1, e2}, "limit", 5) == 5)
+	assert(set.sintercard({e1, e2}, "limit", 99) == 11)
+	-- the mixed encodings: a listpack-ish operand pushes the result to a hashtable,
+	-- where the members are the same set whatever the bucket order is
+	local mix = set.new(); mix:sadd("not-an-integer")
+	for i = 1, 20 do mix:sadd(i) end
+	local mixdiff = set.sdiff({mix, e1})
+	assert(set.sdiffcard({mix, e1}) == 1)
+	local md = {}
+	for _, v in ipairs(mixdiff) do md[v] = true end
+	assert(md["not-an-integer"] and #mixdiff == 1)
+
+	-- ---- the encoding thresholds, at the stock config defaults --------------
+	-- set-max-listpack-entries is 128: the 129th short member converts the payload,
+	-- and a conversion must not change one member.
+	local lp129 = set.new()
+	for i = 1, 129 do lp129:sadd("v" .. i) end
+	assert(lp129:scard() == 129 and lp129:sismember("v129") == 1)
+	-- set-max-listpack-value is 64: a 65-byte member converts on its own
+	local lv = set.new()
+	lv:sadd(string.rep("x", 65))
+	assert(lv:scard() == 1 and #lv:smembers()[1] == 65)
+	-- set-max-intset-entries is 512: the 513th integer converts to a hashtable
+	local is513 = set.new()
+	for i = 1, 513 do is513:sadd(i) end
+	assert(is513:scard() == 513 and is513:sismember("513") == 1)
+	assert(set.sunioncard({is513, e1}) == 513)
+
+	-- ---- the error contract -------------------------------------------------
+	local bitmap = require "bitmap"
+	assert(errtext(function() s:sadd() end) ==
+		"ERR wrong number of arguments for 'sadd' command")
+	assert(errtext(function() s:srem() end) ==
+		"ERR wrong number of arguments for 'srem' command")
+	assert(errtext(function() s:sismember() end) ==
+		"ERR wrong number of arguments for 'sismember' command")
+	assert(errtext(function() s:sismember("a", "b") end) ==
+		"ERR wrong number of arguments for 'sismember' command")
+	assert(errtext(function() s:smembers("x") end) ==
+		"ERR wrong number of arguments for 'smembers' command")
+	assert(errtext(function() s:spop("a", "b") end) == "ERR syntax error")
+	assert(errtext(function() s:spop("notanumber") end) ==
+		"ERR value is out of range, must be positive")
+	assert(errtext(function() s:spop(-1) end) ==
+		"ERR value is out of range, must be positive")
+	assert(errtext(function() s:srandmember("notanumber") end) ==
+		"ERR value is not an integer or out of range")
+	assert(errtext(function() s:srandmember(1, 2) end) == "ERR syntax error")
+	-- a member is an argument, not a handle or a table
+	assert(errtext(function() s:sadd({}) end) ==
+		"ERR string or number expected, got table")
+	assert(errtext(function() s:sismember({}) end) ==
+		"ERR string or number expected, got table")
+	-- the wrong kind of handle is Redis' WRONGTYPE, at every place a key is read:
+	-- the receiver, the destination of SMOVE, an operand of a set operation. A bitmap
+	-- has no `sadd` field to call, so the receiver case is reached by taking the
+	-- class function and handing it a bitmap -- which is exactly what a method call
+	-- would have done with a handle of the wrong kind.
+	local set_class = getmetatable(set.new())
+	assert(errtext(function() set_class.sadd(bitmap.new(), "a") end) ==
+		"WRONGTYPE Operation against a key holding the wrong kind of value")
+	assert(errtext(function() set.smove(u1, bitmap.new(), "a") end) ==
+		"WRONGTYPE Operation against a key holding the wrong kind of value")
+	assert(errtext(function() set.sunion({u1, bitmap.new()}) end) ==
+		"WRONGTYPE Operation against a key holding the wrong kind of value")
+	-- an option word that is not there, and one that never exists here
+	assert(errtext(function() set.sintercard({u1, u2}, "limit") end) == "ERR syntax error")
+	assert(errtext(function() set.sintercard({u1, u2}, "limit", -1) end) ==
+		"ERR LIMIT can't be negative")
+	assert(errtext(function() set.sunioncard({u1, u2}, "approx") end) == "ERR syntax error")
+	assert(errtext(function() set.sunion({u1, u2}, "withscores") end) == "ERR syntax error")
+
+	-- upper case reaches the same function, so it reaches the same reply
+	assert(s:SISMEMBER("a") == 1 and s:SCARD() == 4)
+	assert(s:SADD("qq") == 1 and s:SMEMBERS() and #s:SMEMBERS() == 5)
+	assert(set.SINTERCARD({u1, u2}) == 1)
+	assert(#set.SDIFF({u1, u2}) == 2)
+
+	-- free() releases the payload; every command then refuses the released handle
+	local t = set.new()
+	t:sadd("x")
+	t:free()
+	assert(errtext(function() t:sadd("y") end) ==
+		"WRONGTYPE Operation against a key holding the wrong kind of value")
+end
+
+
 local function test_dump()
 	local bitmap = require "bitmap"
 	local hll = require "hll"
 	local sortedset = require "sortedset"
 	local geo = require "geo"
+	local set = require "set"
 
 	-- spec §4's blob for the sorted-set family: uint32 count, then count records
 	-- of float64 score + uint32 member length + that many member bytes, every
@@ -1049,6 +1284,51 @@ local function test_dump()
 	end
 	assert(errtext(function() sortedset.load({}) end) == "ERR string expected, got table")
 
+	-- ---- set: the same layout without the scores ----------------------------
+	-- uint32 count, then count records of uint32 length + that many member bytes,
+	-- the members in ascending byte order, so one content writes one blob however
+	-- it was built and whichever encoding the payload ended up in.
+	local function set_member(s, want)
+		local off, n = 5, u32(s, 1)
+		for i = 1, n do
+			local mlen = u32(s, off)
+			if i == want then return s:sub(off+4, off+4+mlen-1) end
+			off = off + 4 + mlen
+		end
+		return nil
+	end
+	local sd = set.new()
+	sd:sadd("b", "a10", "a9")
+	local sblob = sd:dump()
+	assert(u32(sblob, 1) == 3)
+	-- byte order puts "a10" before "a9" ("1" < "9"), which is a plain memcmp, not
+	-- Lua's or Redis' any-more; and members read back as the bytes they were sent.
+	assert(set_member(sblob, 1) == "a10" and set_member(sblob, 2) == "a9"
+		and set_member(sblob, 3) == "b")
+	assert(#sblob == 4 + (4+3) + (4+2) + (4+1))
+	local sd2 = set.load(sblob)
+	assert(sd2:dump() == sblob and sd2:scard() == 3)
+	-- insertion order cannot be seen in the blob
+	local sd3 = set.new(); sd3:sadd("b"); sd3:sadd("a9"); sd3:sadd("a10")
+	assert(sd3:dump() == sblob)
+	-- an untouched handle and an emptied one are the empty blob, and load() of it is
+	-- a handle with nothing in it
+	assert(set.new():dump() == string.char(0, 0, 0, 0))
+	assert(set.load(string.char(0, 0, 0, 0)):scard() == 0)
+	-- a NUL is data, not an end
+	local sbin = set.new(); sbin:sadd("\0\1\255")
+	assert(set.load(sbin:dump()):sismember("\0\1\255") == 1)
+	-- an integer member is stored as an integer and dumped as its decimal text; the
+	-- blob sorts those bytes ("42" before "7", by byte), while the intset payload
+	-- itself is iterated in ascending *value* order, which is what SMEMBERS shows.
+	local sint = set.new(); sint:sadd(7, 42)
+	assert(set_member(sint:dump(), 1) == "42" and set_member(sint:dump(), 2) == "7")
+	assert(sint:smembers()[1] == "7" and sint:sismember("42") == 1)
+	assert(errtext(function() set.load(sint:dump() .. "x") end) == "ERR Bad data format")
+	assert(errtext(function() set.load(string.char(1, 0, 0, 0)) end) ==
+		"ERR Bad data format")
+	assert(errtext(function() set.load("\0\0") end) == "ERR Bad data format")
+
 	-- ---- geo: a geoset is a sorted set, so the blob is interchangeable ----
 	local g = geo.new()
 	g:geoadd(116.4898586, 39.9167148, "SF")
@@ -1078,6 +1358,7 @@ local function test_wrapper()
 	local hll = require "hll"
 	local sortedset = require "sortedset"
 	local geo = require "geo"
+	local set = require "set"
 
 	-- The wrapper's promise (spec §3.1): every Redis command name works in its
 	-- uppercase form and reaches the SAME function, so both shapes cannot differ
@@ -1122,6 +1403,19 @@ local function test_wrapper()
 	check_aliases(hll, 5)             -- PFADD PFCOUNT PFMERGE PFDEBUG PFSELFTEST
 	check_aliases(sortedset, 31)
 	check_aliases(geo, 10)
+	check_aliases(set, 15)            -- SADD SREM SCARD SMEMBERS SISMEMBER
+	                                  -- SMISMEMBER SMOVE SPOP SRANDMEMBER SUNION
+	                                  -- SINTER SDIFF SUNIONCARD SINTERCARD SDIFFCARD
+	-- the shapes the enumeration is about: the set operations take their operand list
+	-- as argument 1, so they are module functions only (a receiver would have nothing
+	-- to be -- the same rule NOTICE 6 records for sortedset.zmpop), while SMOVE, whose
+	-- receiver is the source and whose destination is an ordinary argument, is valid
+	-- both ways.
+	local setclass = getmetatable(set.new())
+	assert(set.sunion ~= nil and setclass.sunion == nil)
+	assert(set.SUNION == set.sunion and set.SINTERCARD == set.sintercard)
+	assert(set.smove ~= nil and setclass.smove ~= nil)
+	assert(setclass.sadd ~= nil and setclass.SADD == setclass.sadd)
 
 	-- upper case reaches the same behaviour, not just the same function
 	local b = bitmap.new()
@@ -1218,6 +1512,7 @@ end
 
 local function test_scale()
 	local sortedset = require "sortedset"
+	local set = require "set"
 
 	-- spec §6.1's last bullet: correctness at 1e6 elements (it sets no time
 	-- budget; the measured cost is recorded in NOTICE §5). Everything here is an
@@ -1262,6 +1557,34 @@ local function test_scale()
 	-- the whole remaining set is exactly the first half, in order
 	assert(#z:zrange(0, N / 2 - 1) == N / 2)
 	assert(z:zrange(N / 2 - 1, N / 2 - 1) [1] == "m" .. (N / 2))
+
+	-- ---- set at scale ------------------------------------------------------
+	-- 1e5 members crosses every encoding threshold of this family (intset at 512,
+	-- listpack at 128 entries) and lands in a hashtable that rehashes on the way, so
+	-- these are the growth paths of setTypeAddAux / maybeConvertIntset and the O(1)
+	-- membership the set operations depend on. All exact values again.
+	local M = 100000
+	local sa = set.new()
+	for i = 1, M do assert(sa:sadd("s" .. i) == 1) end
+	assert(sa:scard() == M)
+	assert(sa:sismember("s1") == 1 and sa:sismember("s" .. M) == 1 and
+		sa:sismember("s" .. (M + 1)) == 0)
+	assert(sa:sadd("s1") == 0 and sa:scard() == M)
+	local sb = set.new()
+	for i = 1, M / 2 do assert(sb:sadd("s" .. i * 2) == 1) end
+	assert(set.sintercard({sa, sb}) == M / 2)
+	assert(set.sdiffcard({sa, sb}) == M / 2)
+	assert(set.sunioncard({sa, sb}) == M)
+	assert(#set.sinter({sa, sb}) == M / 2 and #set.sunion({sa, sb}) == M)
+	-- a LIMIT stops the intersection where it says
+	assert(set.sintercard({sa, sb}, "limit", 1000) == 1000)
+	-- delete half of it and the membership answers follow
+	for i = 1, M / 2 do assert(sa:srem("s" .. i) == 1) end
+	assert(sa:scard() == M / 2)
+	assert(sa:sismember("s1") == 0 and sa:sismember("s" .. (M / 2 + 1)) == 1)
+	-- a 1e5-member set dumps and reloads byte-identically
+	local mblob = sa:dump()
+	assert(set.load(mblob):dump() == mblob)
 end
 
 
@@ -1276,12 +1599,15 @@ local function test_missing_args()
 	local hll = require "hll"
 	local sortedset = require "sortedset"
 	local geo = require "geo"
+	local set = require "set"
 	local s1, s2, d = sortedset.new(), sortedset.new(), sortedset.new()
 	s1:zadd(1, "a")
 	s2:zadd(2, "b")
 	local b = bitmap.new()  b:setbit(0, 1)
 	local u = hll.new()     u:pfadd("e")
 	local g = geo.new()     g:geoadd(13.36, 38.11, "CT")
+	local st = set.new()    st:sadd("a")
+	local st2 = set.new()   st2:sadd("b")
 
 	local function arity(fn, cmd)
 		assert(errtext(fn) == "ERR wrong number of arguments for '" .. cmd ..
@@ -1307,6 +1633,32 @@ local function test_missing_args()
 	arity(function() g:georadius(1, 2, 3) end, "georadius")
 	arity(function() g:georadiusbymember("CT", 10) end, "georadiusbymember")
 
+	-- ---- set: every argument a Redis command gets from argv -----------------
+	-- the operand-list forms (the list is argument 1, so it has to be there),
+	arity(function() set.sunion() end, "sunion")
+	arity(function() set.sinter() end, "sinter")
+	arity(function() set.sdiff() end, "sdiff")
+	arity(function() set.sintercard() end, "sintercard")
+	arity(function() set.sunioncard() end, "sunioncard")
+	arity(function() set.sdiffcard() end, "sdiffcard")
+	-- the -3 commands that need at least one member,
+	arity(function() st:sadd() end, "sadd")
+	arity(function() st:srem() end, "srem")
+	arity(function() st:smismember() end, "smismember")
+	-- the fixed-arity ones, both directions,
+	arity(function() st:sismember() end, "sismember")
+	arity(function() st:sismember("a", "b") end, "sismember")
+	arity(function() st:scard("x") end, "scard")
+	arity(function() st:smembers("x") end, "smembers")
+	arity(function() st:smove(st2) end, "smove")
+	arity(function() set.smove(st, st2, "a", "extra") end, "smove")
+	-- and an operand list that is empty, which for SUNION/SINTER/SDIFF is "too few
+	-- keys" (arity -2) while the CARDINALITY family has an explicit numkeys check.
+	assert(errtext(function() set.sunion({}) end) ==
+		"ERR wrong number of arguments for 'sunion' command")
+	assert(errtext(function() set.sintercard({}) end) ==
+		"ERR numkeys should be greater than 0")
+
 	-- ...while the argument that *is* there in the wrong shape keeps a text that
 	-- says which shape was wanted, and a handle of the wrong kind still gets
 	-- Redis' own WRONGTYPE.
@@ -1320,6 +1672,14 @@ local function test_missing_args()
 		"WRONGTYPE Operation against a key holding the wrong kind of value")
 	assert(errtext(function() g:georadius(1, 2, 3, {}) end) ==
 		"ERR unsupported unit provided. please use M, KM, FT, MI")
+	assert(errtext(function() set.sunion("x") end) ==
+		"ERR table expected, got string")
+	assert(errtext(function() set.sunion({ st, b }) end) ==
+		"WRONGTYPE Operation against a key holding the wrong kind of value")
+	assert(errtext(function() set.smove(st, b, "a") end) ==
+		"WRONGTYPE Operation against a key holding the wrong kind of value")
+	assert(errtext(function() st:sadd({}) end) ==
+		"ERR string or number expected, got table")
 
 	-- an argument that is there but not a word: no raw luaL_check* is left in the
 	-- facades, so these answer with the facade's own registered text, never with
@@ -1337,6 +1697,7 @@ local function test_missing_args()
 	assert(#g:georadius(13.36, 38.11, 10, "km") == 1)
 	assert(sortedset.zunionstore(d, { s1, s2 }) == 2)
 	assert(u:pfdebug("encoding") == "sparse")
+	assert(st:sismember("a") == 1 and #set.sunion({ st, st2 }) == 2)
 end
 
 local tests = {
@@ -1344,6 +1705,7 @@ local tests = {
 	{ "hll", test_hll },
 	{ "sortedset", test_sortedset },
 	{ "geo", test_geo },
+	{ "set", test_set },
 	{ "dump", test_dump },
 	{ "wrapper", test_wrapper },
 	{ "scale", test_scale },
@@ -1356,6 +1718,10 @@ local function run()
 		if not ok then
 			error(item[1] .. ": " .. tostring(message), 0)
 		end
+		-- one line per family, so a family that is silently not built cannot pass
+		-- by being absent (NOTICE §5's eight families are nine now).
+		io.stdout:write("redislib-smoke: ", item[1], " ok\n")
+		io.stdout:flush()
 	end
 	local success_file = assert(io.open("redislib-smoke.ok", "wb"))
 	success_file:write("ok\n")

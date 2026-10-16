@@ -8,12 +8,16 @@
  * header (that is the ordering every Redis kernel file uses). */
 #include "monotonic.h"
 #include "redislib_port.h"
+#include "intset.h"  /* intsetNew(), for the createIntsetObject() factory below */
 
 #include <stdarg.h>
 
 /* server.* globals read by the kernels; defaults taken from src/config.c. */
 redislibServerConfig server = {
     3000, /* hll_sparse_max_bytes      -- config.c:3497 */
+    512,  /* set_max_intset_entries    -- config.c:3489 */
+    128,  /* set_max_listpack_entries  -- config.c:3490 */
+    64,   /* set_max_listpack_value    -- config.c:3491 */
     128,  /* zset_max_listpack_entries -- config.c:3492 */
     64,   /* zset_max_listpack_value   -- config.c:3496 */
     0,    /* memory_tracking_enabled   -- off, as in a stock Redis build */
@@ -120,19 +124,50 @@ robj *createZsetListpackObject(void) {
     return o;
 }
 
-/* Abort stubs for the SET type API (src/t_set.c). The t_zset.c zunionstore /
- * zdiffstore helper block reaches them only when a command source object has
- * type OBJ_SET, which no redislib facade can produce: rl_object kinds are
- * bitmap / HLL / zset / geo. A stub that returns a plausible value would hide a
- * wiring bug, so these panic with the reason instead. See NOTICE. */
-unsigned long setTypeSize(const robj *subject) {
-    (void)subject;
-    redislib_panic("redislib: SET type objects are not supported by the ported kernel");
+/* src/object.c:464, :471, :478 -- verbatim. The three set payload factories
+ * t_set.c's setTypeCreate() chooses between. */
+robj *createSetObject(void) {
+    dict *d = dictCreate(&setDictType);
+    robj *o = createObject(OBJ_SET,d);
+    o->encoding = OBJ_ENCODING_HT;
+    return o;
 }
 
-int setTypeIsMemberAux(robj *set, char *str, size_t len, int64_t llval, int str_is_sds) {
-    (void)set; (void)str; (void)len; (void)llval; (void)str_is_sds;
-    redislib_panic("redislib: SET type objects are not supported by the ported kernel");
+robj *createIntsetObject(void) {
+    intset *is = intsetNew();
+    robj *o = createObject(OBJ_SET,is);
+    o->encoding = OBJ_ENCODING_INTSET;
+    return o;
+}
+
+robj *createSetListpackObject(void) {
+    unsigned char *lp = lpNew(0);
+    robj *o = createObject(OBJ_SET, lp);
+    o->encoding = OBJ_ENCODING_LISTPACK;
+    return o;
+}
+
+/* src/object.c:566 freeSetObject() -- verbatim, less the DEBUG_ASSERTIONS block
+ * (this port is a non-DEBUG_ASSERTIONS build, which is what the shim's
+ * debugServerAssert() mapping already says; see redislib_port.h). It releases
+ * the payload only, never the robj: t_set.c relies on replacing a set in place. */
+void freeSetObject(robj *o) {
+    switch (o->encoding) {
+    case OBJ_ENCODING_HT:
+        dictRelease((dict*) o->ptr);
+        break;
+    case OBJ_ENCODING_INTSET:
+    case OBJ_ENCODING_LISTPACK:
+        zfree(o->ptr);
+        break;
+    default:
+        serverPanic("Unknown set encoding type");
+    }
+}
+
+/* src/object.c:906 -- verbatim. */
+int isSdsRepresentableAsLongLong(sds s, long long *llval) {
+    return string2ll(s,sdslen(s),llval) ? C_OK : C_ERR;
 }
 
 /* src/server.c:435 -- verbatim. */
@@ -157,8 +192,9 @@ int dictSdsKeyCompare(dictCmpCache *cache, const void *key1, const void *key2)
     return memcmp(key1, key2, l1) == 0;
 }
 
-/* src/server.c:398 -- verbatim (setSdsDestructor, which also updates the dict
- * metadata size, is not ported: no ported dictType installs a metadata size). */
+/* src/server.c:398 -- verbatim. (setSdsDestructor, which also updates the dict
+ * metadata size, is below with setDictType: from this file on, a ported dictType
+ * does install a metadata size -- the set one does.) */
 void dictSdsDestructor(dict *d, void *val)
 {
     UNUSED(d);
@@ -170,6 +206,42 @@ void *dictSdsDup(dict *d, const void *key) {
     UNUSED(d);
     return sdsdup((const sds) key);
 }
+
+/* src/server.c:404 and :409 -- verbatim. The two callbacks of setDictType: a set
+ * dict keeps the sum of its element bytes in the dict's metadata slot, which is
+ * what t_set.c's htGetMetadataSize() writes at its 151 / 182 / 228 / 500 / 544
+ * and what setTypeAllocSize() reports. */
+void setSdsDestructor(dict *d, void *val) {
+    *htGetMetadataSize(d) -= sdsAllocSize(val);
+    sdsfree(val);
+}
+
+size_t setDictMetadataBytes(dict *d) {
+    UNUSED(d);
+    return sizeof(size_t);
+}
+
+/* src/server.c:633 -- verbatim, and the reason a ported dictType now installs a
+ * metadata size. Unlike hashDictType / sdsReplyDictType this one is NOT static:
+ * t_set.c:530 (kept, verbatim) does `dictCreate(&setDictType)`, and a kernel
+ * file may not be edited beyond the three mechanical kinds, so the symbol has to
+ * be visible to it. That is safe because t_set.c and this file are both inside
+ * rlcore -- the data symbol never crosses a DLL boundary. A facade must not take
+ * its address either way: it creates sets through createSetObject() and friends,
+ * which are functions. Same shape as zsetDictType, which the ported t_zset.c
+ * defines and createZsetObject() uses. */
+dictType setDictType = {
+    dictSdsHash,               /* hash function */
+    NULL,                      /* key dup */
+    NULL,                      /* val dup */
+    dictSdsKeyCompare,         /* key compare */
+    setSdsDestructor,          /* key destructor */
+    NULL,                      /* val destructor */
+    NULL,                      /* allow to expand */
+    .no_value = 1,             /* no values in this dict */
+    .keys_are_odd = 1,         /* an SDS string is always an odd pointer */
+    .dictMetadataBytes = setDictMetadataBytes,
+};
 
 /* src/server.c:690 -- verbatim. ZRANDMEMBER's CASE 4 staging dict owns the
  * copies of the sampled members, so both destructors are the sds ones.
@@ -199,7 +271,7 @@ static dictType sdsReplyDictType = {
     NULL                        /* allow to expand */
 };
 
-/* The three accessors above (redislib_port.h): the facades are separate shared
+/* The accessors above (redislib_port.h): the facades are separate shared
  * objects from this library, and a data symbol imported across a Windows DLL
  * boundary is resolved by the linker's auto-import rewriting while a function
  * call is resolved by the import table itself. Nothing here changes a value --

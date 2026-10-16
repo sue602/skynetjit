@@ -16,6 +16,7 @@ static const char *const class_names[] = {
     "redis.hll",
     "redis.zset",
     "redis.geo",
+    "redis.set",
 };
 
 int rl_error(lua_State *L, const char *fmt, ...) {
@@ -114,6 +115,15 @@ void rl_free_zset(robj *zobj) {
         zfree(zs);
     }
     zfree(zobj);
+}
+
+void rl_free_set(robj *sobj) {
+    /* object.c's freeSetObject() for all three set encodings, plus the robj it
+     * leaves alone (t_set.c uses that half to replace a payload in place; here
+     * the whole value goes). */
+    if (sobj == NULL) return;
+    freeSetObject(sobj);
+    zfree(sobj);
 }
 
 void rl_checkmember(lua_State *L, int idx) {
@@ -302,6 +312,134 @@ bad:
     return NULL;                      /* not reached */
 }
 
+/* ---- the set family blob (spec §4) -------------------------------------- */
+
+/* Ascending byte order, ties broken by length: a total order on distinct member
+ * byte strings, which is what makes one set write one blob. */
+static int rl_cmp_members(const void *pa, const void *pb) {
+    sds a = *(const sds*)pa, b = *(const sds*)pb;
+    size_t la = sdslen(a), lb = sdslen(b);
+    int r = memcmp(a, b, la < lb ? la : lb);
+
+    if (r) return r;
+    return la < lb ? -1 : (la > lb ? 1 : 0);
+}
+
+/* Every member, as a fresh sds per element -- setTypeNextObject()'s documented
+ * contract ("if you don't retain a pointer to this object you should call
+ * sdsfree() against it"), which is why it is the entry point a copy-out walk
+ * uses. This is upstream's own loop shape (t_set.c:536 setTypeConvertAndExpand).
+ * An integer member comes back as its decimal text, the bytes SMEMBERS replies. */
+static sds *
+rl_set_members(robj *sobj, unsigned long *out) {
+    sds *members = NULL;
+    unsigned long n = 0, cap = 0;
+
+    if (sobj != NULL) {
+        setTypeIterator si;
+        sds ele;
+
+        setTypeInitIterator(&si, sobj);
+        while ((ele = setTypeNextObject(&si)) != NULL) {
+            if (n == cap) {
+                cap = cap ? cap * 2 : 16;
+                members = zrealloc(members, sizeof(sds) * cap);
+            }
+            members[n++] = ele;
+        }
+        setTypeResetIterator(&si);
+    }
+    *out = n;
+    return members;
+}
+
+sds rl_dump_set(robj *sobj) {
+    sds *members;
+    unsigned long n = 0, i;
+    unsigned char hdr[4];
+    sds out;
+
+    members = rl_set_members(sobj, &n);
+    if (n > 1) qsort(members, (size_t)n, sizeof(sds), rl_cmp_members);
+
+    out = sdsempty();
+    rl_wr32(hdr, (uint32_t)n);
+    out = sdscatlen(out, hdr, sizeof(hdr));
+    for (i = 0; i < n; i++) {
+        rl_wr32(hdr, (uint32_t)sdslen(members[i]));
+        out = sdscatlen(out, hdr, sizeof(hdr));
+        out = sdscatlen(out, members[i], sdslen(members[i]));
+        sdsfree(members[i]);
+    }
+    if (members) zfree(members);
+    return out;
+}
+
+/* Where each record's bytes start, so the whole shape can be validated before a
+ * single byte is copied into the object being built. */
+typedef struct {
+    const unsigned char *p;
+    uint32_t len;
+} rl_member_ref;
+
+robj *rl_load_set(lua_State *L, const char *buf, size_t len) {
+    const unsigned char *p = (const unsigned char*)buf;
+    const unsigned char *end = p + len;
+    rl_member_ref *rec = NULL;
+    robj *sobj = NULL;
+    uint32_t count, i;
+
+    if (len < 4) goto bad;
+    count = rl_rd32(p);
+    p += 4;
+
+    /* Every record costs at least its 4-byte length, so a count that cannot be
+     * filled from what is left is a bad blob. Checked before anything is sized
+     * from it -- the sorted-set loader has the same rule and the same reason: a
+     * four-byte "count 4294967295" must not ask for a 4G array. */
+    if (count > (uint32_t)((len - 4) / 4)) goto bad;
+
+    /* An empty blob has no records but still needs a non-NULL block: zmalloc(0)
+     * may hand back NULL, which would look like an allocation failure. */
+    rec = zmalloc(sizeof(*rec) * (count ? count : 1));
+    if (rec == NULL) goto bad;
+
+    for (i = 0; i < count; i++) {
+        if ((size_t)(end - p) < 4) goto bad;
+        rec[i].len = rl_rd32(p);
+        p += 4;
+        if ((size_t)(end - p) < rec[i].len) goto bad;
+        rec[i].p = p;
+        p += rec[i].len;
+    }
+    if (p != end) goto bad;                 /* trailing bytes */
+
+    /* The shape is validated: nothing between here and the return can fail, so a
+     * raise never leaves a half-built set behind and the handle the caller pushed
+     * stays empty. Redis picks a new key's payload from the first member and from
+     * how many members the call brings (saddCommand's
+     * setTypeCreate(argv[2]->ptr, c->argc-2)), and the blob has both, so the same
+     * factory decision is made here: a loaded set is indistinguishable from one
+     * that was SADDed as this list, encoding included. */
+    for (i = 0; i < count; i++) {
+        sds ele = sdsnewlen(rec[i].p, rec[i].len);
+
+        if (sobj == NULL) sobj = setTypeCreate(ele, count);
+        setTypeAdd(sobj, ele);
+        sdsfree(ele);                       /* the set owns its copy */
+    }
+    zfree(rec);
+    return sobj;
+
+bad:
+    /* rl: Redis' own text for a serialized payload it cannot parse (the reply
+     * for a bad RESTORE payload, cluster.c:290), same as rl_load_zset(). */
+    if (rec) zfree(rec);
+    if (sobj) rl_free_set(sobj);
+    rl_error(L, "Bad data format");
+    return NULL;                            /* not reached */
+}
+
 const char *rl_checkblob(lua_State *L, int idx, size_t *len) {
     if (lua_type(L, idx) != LUA_TSTRING)
         rl_error(L, "string expected, got %s", lua_typename(L, lua_type(L, idx)));
@@ -321,6 +459,10 @@ void rl_free_ud(lua_State *L, void *p) {
     case RL_GEO:
         rl_free_zset(o->zobj);
         o->zobj = NULL;
+        break;
+    case RL_SET:
+        rl_free_set(o->sobj);
+        o->sobj = NULL;
         break;
     }
     o->kind = (rl_kind)-1;

@@ -9,9 +9,11 @@
 `export` builds an HLL and a string value on a real server and writes the bytes
 `GET` returns; the library then loads them (interop_lib.lua). `import` takes the
 bytes the library produced, hands them to the server -- SET for a string, a parsed
-ZADD replay for the sorted-set and geoset blobs, which is exactly what spec 4
-promises a foreign reader can do -- and checks that both sides count the same
-things. Every check is printed; any failure makes the exit code nonzero.
+ZADD replay for the sorted-set and geoset blobs, a parsed SADD replay for the two
+set blobs, which is exactly what spec 4 promises a foreign reader can do -- and
+checks that both sides count the same things and combine the same members. Member
+lists are compared sorted, because a set answers no order; every check is printed,
+and any failure makes the exit code nonzero.
 """
 import argparse
 import json
@@ -24,16 +26,35 @@ HLL_KEY = "interop:hll"
 STR_KEY = "interop:str"
 ZSET_KEY = "interop:zset"
 GEO_KEY = "interop:geo"
-# Both phases work entirely inside these four names, so they clear exactly them
+SET_A_KEY = "interop:set_a"
+SET_B_KEY = "interop:set_b"
+# Both phases work entirely inside these names, so they clear exactly them
 # and never FLUSHDB: the round trip used to wipe the whole selected database,
 # which is fine on a throwaway server and destructive on one that holds data.
-OWNED_KEYS = (HLL_KEY, STR_KEY, ZSET_KEY, GEO_KEY)
+OWNED_KEYS = (HLL_KEY, STR_KEY, ZSET_KEY, GEO_KEY, SET_A_KEY, SET_B_KEY)
 
 
 def fresh(r):
     for key in OWNED_KEYS:
         r.cmd("DEL", key)
     return r
+
+
+def set_records(blob_hex):
+    """Parse spec 4's set blob: uint32 count, then count records of uint32 length
+    and that many member bytes, little-endian. The members come out in the blob's
+    own order, which is ascending byte order, so a sorted() of them is also a
+    sorted() of the reply Redis sends for the same content."""
+    blob = bytes.fromhex(blob_hex)
+    (count,) = struct.unpack_from("<I", blob, 0)
+    off, out = 4, []
+    for _ in range(count):
+        (mlen,) = struct.unpack_from("<I", blob, off)
+        member = blob[off + 4: off + 4 + mlen].decode("utf-8")
+        out.append(member)
+        off += 4 + mlen
+    assert off == len(blob), "set blob has trailing bytes"
+    return out
 
 
 def blob_records(blob_hex):
@@ -122,7 +143,48 @@ def phase_import(a):
           r.cmd("GEODIST", GEO_KEY, "Palermo", "Catania", "km"),
           "%.4f" % lib["geo_dist"])
 
-    # 5. what the library made of the server's bytes (interop_lib.lua's report)
+    # 5. the set blobs, replayed with plain SADD, and the operations re-run on them.
+    # Every member list is compared sorted: a set is unordered, and one side's
+    # payload order is not a promise the other side can keep (interop_lib.lua says
+    # the same rule on its side of the file). The three CARDINALITY commands answer
+    # an integer, which is why they are compared here and not in the oplog: their
+    # wire form puts a numkeys count in the one slot a record has no value for.
+    a_members = set_records(lib["set_a_dump"])
+    b_members = set_records(lib["set_b_dump"])
+    for m in a_members:
+        r.cmd("SADD", SET_A_KEY, m)
+    for m in b_members:
+        r.cmd("SADD", SET_B_KEY, m)
+    check("server SCARD after replaying a library set blob",
+          r.cmd("SCARD", SET_A_KEY), lib["set_a_scard"])
+    check("server SCARD of the second set blob",
+          r.cmd("SCARD", SET_B_KEY), lib["set_b_scard"])
+    check("server SMEMBERS == the blob's members",
+          sorted(r.cmd("SMEMBERS", SET_A_KEY)), sorted(a_members))
+    check("server SMEMBERS == the library's own smembers",
+          sorted(r.cmd("SMEMBERS", SET_A_KEY)), lib["set_a_members"])
+    check("server SUNION == library sunion",
+          sorted(r.cmd("SUNION", SET_A_KEY, SET_B_KEY)), lib["set_union"])
+    check("server SINTER == library sinter",
+          sorted(r.cmd("SINTER", SET_A_KEY, SET_B_KEY)), lib["set_inter"])
+    check("server SDIFF == library sdiff",
+          sorted(r.cmd("SDIFF", SET_A_KEY, SET_B_KEY)), lib["set_diff"])
+    check("server SDIFF the other way == library sdiff",
+          sorted(r.cmd("SDIFF", SET_B_KEY, SET_A_KEY)), lib["set_rdiff"])
+    check("server SUNIONCARD == library sunioncard",
+          r.cmd("SUNIONCARD", 2, SET_A_KEY, SET_B_KEY), lib["set_unioncard"])
+    check("server SINTERCARD == library sintercard",
+          r.cmd("SINTERCARD", 2, SET_A_KEY, SET_B_KEY), lib["set_intercard"])
+    check("server SDIFFCARD == library sdiffcard",
+          r.cmd("SDIFFCARD", 2, SET_A_KEY, SET_B_KEY), lib["set_diffcard"])
+    check("server SINTERCARD ... LIMIT 1 == library's",
+          r.cmd("SINTERCARD", 2, SET_A_KEY, SET_B_KEY, "LIMIT", 1),
+          lib["set_intercard_l1"])
+    check("server SDIFFCARD ... LIMIT 2 == library's",
+          r.cmd("SDIFFCARD", 2, SET_B_KEY, SET_A_KEY, "LIMIT", 2),
+          lib["set_diffcard_l2"])
+
+    # 6. what the library made of the server's bytes (interop_lib.lua's report)
     check("library PFCOUNT of a server sketch", report["hll_loaded_count"],
           redis_side["hll_count"])
     check("library load() keeps the server's bytes", report["hll_reparse_same"],

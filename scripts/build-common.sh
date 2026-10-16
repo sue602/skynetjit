@@ -58,7 +58,7 @@ Options:
   --no-netbull    Skip the vendored NetBull luaclib set (cjson, luacurl, lfs,
                   pb, sqlite3, zlib, zset) and its dependency downloads.
   --netbull       Build the NetBull luaclib set (default).
-  --no-redislib   Skip the redislib set (Redis 8.10.0 bitmap/geo/hll/sortedset
+  --no-redislib   Skip the redislib set (Redis 8.10.0 bitmap/geo/hll/sortedset/set
                   kernels under redislib-src/ and luaclib/redis/*.so).
   --redislib      Build the redislib set (default).
   --no-alloc-hooks

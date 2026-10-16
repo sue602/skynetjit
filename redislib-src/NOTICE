@@ -86,11 +86,12 @@ nothing calls them yet: the `zsl*` / `zzl*` skiplist and listpack API (the plan
 requires all of it) and `invalid_hll_err` in `hyperloglog.c` (its text is the
 PF* error message Task 3 must reproduce).
 
-`redislib_port.h`, `redislib_port.c` and `t_zset.h` are the only files not taken
-from Redis: the first two are the shim described in section 4, and `t_zset.h` is
-the sorted-set / skiplist type block plus the `zsl*`/`zzl*` prototypes copied out
-of `$RSRC/src/server.h` (which is not part of the port). `kernel/` holds 43 files
-in total: 20 `.c` plus 23 `.h`, of which 40 come from Redis.
+`redislib_port.h`, `redislib_port.c`, `t_zset.h` and `t_set.h` are the only files
+not taken from Redis: the first two are the shim described in section 4, and the
+two `.h` files are the sorted-set / skiplist and the set type blocks plus their
+prototypes copied out of `$RSRC/src/server.h` (which is not part of the port).
+`kernel/` holds 48 files in total: 22 `.c` plus 26 `.h`, of which 44 come from
+Redis.
 
 
 3. File map
@@ -105,6 +106,10 @@ Kernel files with the command layer removed (edit B):
                       isHLLObjectOrReply() removed; hll* kept
     t_zset.c          all Z*/ZRANGEBY* /ZUNION* command functions removed;
                       zsl*/zzl*/zset* kept
+    t_set.c           all S* command functions (saddCommand .. sdiffcardCommand,
+                      $RSRC/src/t_set.c:626-2047) removed; the setType* /
+                      intset-and-listpack conversion block :1-625 kept, plus
+                      setTypePopRandom removed with its callers (section 6, Set)
 
 Files copied verbatim except for include lines (edit A + C):
     adlist.c  crc16.c  dict.c  fast_float_strtod.c  intset.c  listpack.c
@@ -239,6 +244,26 @@ Everything the ported kernels used to get from `server.h`, `zmalloc.h`,
 each entry is either the upstream definition copied verbatim, a documented
 stand-in for server-core state the kernels only read, or an abort for a code
 path no redislib facade can reach.
+
+Added for the Set family (Task 11): `createSetObject` (`object.c:464`),
+`createIntsetObject` (`:471`), `createSetListpackObject` (`:478`),
+`freeSetObject` (`:566`, payload only -- `t_set.c:107` and `:548` rely on it not
+freeing the robj) and `isSdsRepresentableAsLongLong` (`:906`) are the object.c
+entry points the kept `t_set.c` range calls; `setDictType` (`server.c:633`) with
+`setSdsDestructor` (`:404`) and `setDictMetadataBytes` (`:409`) are the server.c
+ones, and `htGetMetadataSize()` (`server.h:4032`) is the one-line helper over
+`dictMetadata()` that those two use. `server` gains `set_max_intset_entries`
+(512, `config.c:3489`), `set_max_listpack_entries` (128, `:3490`) and
+`set_max_listpack_value` (64, `:3491`).
+
+Two consequences of that list are worth naming. The earlier claim that no ported
+`dictType` installs a metadata size stops being true here, which is exactly why
+the two `server.c` callbacks moved in. And the abort stubs this section used to
+carry for `setTypeSize()` and `setTypeIsMemberAux()` -- needed while the ported
+`zunion`/`zdiff` block referenced them from unreachable `OBJ_SET` arms -- are
+gone, because `t_set.c` now defines both; those five arms
+(`kernel/t_zset.c` 2020 / 2062 / 2099 / 2126 / 2252) are reachable, so
+ZUNION/ZINTER/ZDIFF can take set sources.
 
 `redislib_port.h` -- macros:
     zmalloc / zrealloc / zfree            -> skynet_malloc / skynet_realloc /
@@ -403,10 +428,34 @@ LF. `.gitattributes` pins `redislib-src/**` and the two redislib test files to
 *every* line changed, that is a line-ending artefact -- strip the CR
 (`sed 's/\r$//'`) before believing it.
 
-Build shape -- one `rlcore` library. `integration/redislib.mk` links the 21
-kernel objects into a single shared library, `rlcore.dll` (plus its MinGW import
+Set (Task 11) was verified the same way as the other four families, and three of
+its results are specific to it:
+
+- Differential replay against a live `redis-server` 8.10.0: `run.sh 1 3000` and
+  `run.sh 7 1500` (and CI's `run.sh 4242 1200`) each report **0 differing
+  records**, with the Set commands actually present in the log -- seed 1 emitted
+  293 `sadd`, 215 `srem`, 171 `spop`, 153 `smembers`, 133 `sinter`, 121
+  `srandmember`, 118 `scard`, 93 `sismember`, 76 `smismember`, 76 `smove`, 72
+  `sdiff`, 49 `sunion`. A regenerated oplog is byte-identical whether
+  `luajit` runs it on Windows or in WSL, so the two sides really do replay one
+  stream.
+- `SPOP` and `SRANDMEMBER count` draw *which* members they take from a random
+  source, and the two sides cannot draw the same ones (section 6, Set): the
+  generator therefore degrades a key that has been `SPOP`ed to `SCARD`-only for
+  the rest of the run and never lets it feed a compared set operation, and
+  `diff.py` compares member lists as multisets. Both are stated, not hidden.
+- Coverage that this harness does NOT give: `SINTERCARD`, `SUNIONCARD` and
+  `SDIFFCARD` are replayed error-text-only, because `replay_redis.py` has no
+  `numkeys` arm for them; their cardinality answers are instead checked by
+  `interop.sh`'s round trip against the live server (28 checks, 0 failed). Same
+  reason as the `PFDEBUG` note above -- a hole stated is a hole that cannot rot
+  into a false green.
+
+Build shape -- one `rlcore` library. `integration/redislib.mk` links the 22
+kernel objects (a `$(wildcard .../*.c)`, so a new kernel file needs no makefile
+edit) into a single shared library, `rlcore.dll` (plus its MinGW import
 library `librlcore.a`) on Windows and `librlcore.so` on Linux, installed in the
-output root next to `skynet.exe` / `skynet`. The four `luaclib/redis/*.so`
+output root next to `skynet.exe` / `skynet`. The `luaclib/redis/*.so`
 modules import their kernel calls from it instead of each carrying a private
 copy of the whole kernel: on Windows the four modules were 4,657,995 bytes
 together and are now 1,703,832 -- a 1,060,668-byte `rlcore.dll` plus 108-209 KB
@@ -618,6 +667,25 @@ key too, and `zadd()` after that starts from empty in both).
 Bitmap: none beyond the object model. BITFIELD's offset cap is Redis' own
 `proto-max-bulk-len` default (512MB), taken as a constant because there is no
 config to read.
+
+Set: three differences, all of them about *which* members a random draw takes.
+`setTypePopRandom()` (`$RSRC/src/t_set.c:455-481`) is not ported: it returns a
+refcounted string object, and this port's `robj` has no refcount on purpose (the
+object belongs to the Lua handle that made it), while its only callers were the
+two SPOP command functions that left with the command layer. `spop n` and
+`srandmember n` are therefore built in the facade on top of
+`setTypeRandomElement()` plus the iterator -- the same choice `sortedset.c` made
+for `zrandmember` -- and the order the members come out in is not the order a
+server produces. Two causes compound: the sampler in `t_set.c` draws from libc
+`rand()` while the shim only maps `random`/`srandom` (so nothing seeds either
+one, and a process's first draw is whatever the platform's default sequence
+gives), and SPOP-ing a whole listpack-encoded set makes the server rebuild the
+value as a hashtable while the facade keeps walking the payload. All three show
+up as ordering only, never as a different member set or a different count, which
+is why `diff.py` compares those replies as multisets and why the generator
+degrades a popped key instead of trusting a member list. `sscan` is absent for
+the same reason `zscan` is (section 6, Sorted set): a cursor over a handle is not
+a thing a process-local object needs.
 
 One difference is not the kernel's but Lua's, and it bites at 2^53: a BITFIELD
 `i64`/wide-`u*` value can exceed what a LuaJIT number (a double, Lua 5.1 numeric

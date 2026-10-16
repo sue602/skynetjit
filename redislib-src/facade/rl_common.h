@@ -3,7 +3,7 @@
  *
  * This header is the Task 1 contract (docs/superpowers/plans/2026-10-10-redislib.md,
  * "公共约定：facade 对象模型"): the signatures below are what bitmap.c / geo.c /
- * hll.c / sortedset.c / dump.c are written against, and the implementation is
+ * hll.c / sortedset.c / set.c are written against, and the implementation is
  * contributed by the first facade task (Task 2) as facade/rl_common.c. It is
  * deliberately not compiled by anything yet -- Task 1 has no facade .so target.
  *
@@ -21,7 +21,7 @@
 
 #include "redislib_port.h"
 
-typedef enum { RL_BITMAP, RL_HLL, RL_ZSET, RL_GEO } rl_kind;
+typedef enum { RL_BITMAP, RL_HLL, RL_ZSET, RL_GEO, RL_SET } rl_kind;
 
 typedef struct rl_object {
     rl_kind kind;
@@ -40,6 +40,17 @@ typedef struct rl_object {
                      * A GEO value IS a sorted set, like in Redis: the member is
                      * the member as the caller wrote it and the score is the 52
                      * bit geohash (geohashAlign52Bits). */
+    robj *sobj;     /* set: the kernel's set object view, created by
+                     * setTypeCreate() -- which is what t_set.c's factory does for
+                     * a key that is not there yet, from the first member and the
+                     * number of members of that one SADD, so the encoding
+                     * decision (intset / listpack / hashtable) is Redis'.
+                     * NULL means "no value yet", which is exactly the key a
+                     * server has no answer for: the read commands reply 0, the
+                     * empty array or nil, and the first writer creates it. An
+                     * emptied-out payload stays (NOTICE 6's object-model rule),
+                     * and SPOP of its whole content releases it again because
+                     * that path is a dbDelete() on a server. */
 } rl_object;
 
 /* Raise the error reply Redis would have sent for this failure, as the text a
@@ -87,7 +98,8 @@ double rl_checkdouble(lua_State *L, int idx);   /* "value is not a valid float" 
 long rl_checklong(lua_State *L, int idx);        /* object.c:1241-1267 texts    */
 
 /* __gc entry: releases whatever the kind owns (sdsfree for str, the skiplist +
- * dict or listpack for zobj) through the same allocator the kernel used. */
+ * dict or listpack for zobj, the dict / intset / listpack plus the robj for
+ * sobj) through the same allocator the kernel used. */
 void rl_free_ud(lua_State *L, void *p);
 
 /* A member / lex-bound argument as the kernel wants it: a fresh sds the caller
@@ -116,6 +128,13 @@ const char *rl_argstring(lua_State *L, int idx, const char *cmdname);
  * RL_ZSET / RL_GEO arm, and a facade that swaps the payload of a live object
  * (ZRANGESTORE) calls it directly, without going through the __gc marking. */
 void rl_free_zset(robj *zobj);
+
+/* Release one kernel set object: object.c's freeSetObject() for the payload
+ * (dict / intset / listpack) plus the robj that wraps it, i.e. the whole value.
+ * rl_free_ud() calls it for the RL_SET arm, and the set facade calls it directly
+ * when it replaces a payload (SPOP's "move what is left into a new set"
+ * strategy) or empties one, without going through the __gc marking. */
+void rl_free_set(robj *sobj);
 
 /* Make `fresh` the zset that `dst` holds, releasing the previous one. The store
  * commands (ZRANGESTORE, ZUNION/INTER/DIFFSTORE, GEOSEARCHSTORE, GEORADIUS
@@ -155,6 +174,29 @@ void rl_zset_walk(robj *zobj, void (*emit)(void *arg, sds ele, double score),
                   void *arg);
 sds rl_dump_zset(robj *zobj);
 robj *rl_load_zset(lua_State *L, const char *buf, size_t len);
+
+/* ---- the portable blob of the set family (spec §4, same shape) ----------
+ *
+ * A set has no score, so its blob is the sorted-set one without the float64:
+ *   uint32 count, then count records of uint32 len, len bytes
+ * integers little-endian as ever, and the members in ascending byte order
+ * (memcmp over the common prefix, then by length). That order is what makes one
+ * set write one blob: a set's own iteration order depends on its encoding and on
+ * the order its members arrived in -- intset ascending, listpack insertion
+ * order, hashtable bucket order, exactly as on a server, where SMEMBERS promises
+ * no order either -- so a payload-dependent blob would not be stable across two
+ * servers holding the same content either. Members are the bytes a client sends
+ * and reads: an integer member is stored as an integer and iterated as one, and
+ * it is the decimal text here, which is also what SMEMBERS replies (NOTICE 6).
+ *
+ * rl_dump_set() takes the payload or NULL (an untouched handle) and answers the
+ * empty blob for it. rl_load_set() validates the whole shape before it allocates
+ * anything, then creates the value with setTypeCreate(first member, count) and
+ * adds the members one by one, so a loaded set is the set a SADD of exactly this
+ * list would leave behind -- encoding and all. A bad blob raises "Bad data
+ * format", the same reply as the sorted-set loader. */
+sds rl_dump_set(robj *sobj);
+robj *rl_load_set(lua_State *L, const char *buf, size_t len);
 
 /* The argument of a load() function: a binary string, with no numeric coercion
  * (a number would be a different blob than the bytes the caller meant). */

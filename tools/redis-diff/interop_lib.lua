@@ -12,6 +12,20 @@ local bitmap = require "bitmap"
 local hll = require "hll"
 local sortedset = require "sortedset"
 local geo = require "geo"
+local set = require "set"
+
+-- A set answers a member list Redis promises no order for, and the two sides cannot
+-- be asked for the same order: the payload here is walked in one way, the server's
+-- deferred reply in another, and once a hashtable is involved the bucket order comes
+-- from a hash seed that is random per process. So every member list this step hands
+-- over is sorted, and interop.py sorts the server's reply the same way -- a set
+-- compared as the set it is, with the conversion said out loud instead of hidden.
+local function sorted(t)
+	local out = {}
+	for i = 1, #t do out[i] = t[i] end
+	table.sort(out)
+	return out
+end
 
 local function unhex(s)
 	s = s:gsub("%s", "")
@@ -79,6 +93,18 @@ skynet.start(function()
 	mg:geoadd(13.361389, 38.115556, "Palermo")
 	mg:geoadd(15.0872689, 37.502669, "Catania")
 
+	-- 4. two sets built here, for the server to import and re-run the set operations
+	--    on. This is where SUNIONCARD / SINTERCARD / SDIFFCARD are compared: their
+	--    wire form is `SINTERCARD numkeys key [key ...] [LIMIT limit]`, and an oplog
+	--    record has nowhere to put a count in front of the names -- replay_redis.py
+	--    always sends `CMD key args...` -- so the differential run carries only their
+	--    shared failure text (see gen.lua's note above the set pools) and the answers
+	--    themselves are checked here, on identical content.
+	local sa = set.new()
+	sa:sadd("1", "2", "3", "4", "5", "x\ty")
+	local sb = set.new()
+	sb:sadd("4", "5", "6", "7", "not-an-integer")
+
 	local o = io.open(out_path, "wb")
 	o:write(cjson.encode({
 		hll_hex = hex(mine:dump()),
@@ -90,6 +116,23 @@ skynet.start(function()
 		zset_dump = hex(mz:dump()),
 		geo_dump = hex(mg:dump()),
 		geo_dist = mg:geodist("Palermo", "Catania", "km"),
+		-- a set travels the same way -- uint32 count, then uint32 length and that
+		-- many member bytes, the members in ascending byte order -- and the python
+		-- step replays it with SADD, which is spec 4's promise for this family too
+		set_a_dump = hex(sa:dump()),
+		set_b_dump = hex(sb:dump()),
+		set_a_scard = sa:scard(),
+		set_b_scard = sb:scard(),
+		set_a_members = sorted(sa:smembers()),
+		set_union = sorted(set.sunion({sa, sb})),
+		set_inter = sorted(set.sinter({sa, sb})),
+		set_diff = sorted(set.sdiff({sa, sb})),
+		set_rdiff = sorted(set.sdiff({sb, sa})),
+		set_unioncard = set.sunioncard({sa, sb}),
+		set_intercard = set.sintercard({sa, sb}),
+		set_diffcard = set.sdiffcard({sa, sb}),
+		set_intercard_l1 = set.sintercard({sa, sb}, "limit", 1),
+		set_diffcard_l2 = set.sdiffcard({sb, sa}, "LIMIT", 2),
 	}))
 	o:close()
 

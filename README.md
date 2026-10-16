@@ -72,9 +72,9 @@ Linux 使用独立的一键脚本，产物位于 `build/linux-out`，不与 Wind
 - `--no-netbull`：跳过 `luaclib-src/` 的 7 个 NetBull Lua C 库（cjson、luacurl、
   lfs、pb、sqlite3、zlib、zset）及其 Lua 叠加文件；Windows 下同时不下载、不编译
   zlib/libcurl/CMake 依赖，Linux 下跳过 libcurl/zlib 开发包检查。默认编译这些库；
-- `--no-redislib`：跳过 `redislib-src/` 的 Redis 8.10.0 算法内核与 4 个 Lua C 模块
-  （bitmap、hll、sortedset、geo），不产出内核共享库 `rlcore` 与 `luaclib/redis/*.so`，
-  也不叠加 `lualib/{bitmap,hll,sortedset,geo}.lua`，一键测试里的 redislib 冒烟同样跳过。
+- `--no-redislib`：跳过 `redislib-src/` 的 Redis 8.10.0 算法内核与 5 个 Lua C 模块
+  （bitmap、hll、sortedset、geo、set），不产出内核共享库 `rlcore` 与 `luaclib/redis/*.so`，
+  也不叠加 `lualib/{bitmap,hll,sortedset,geo,set}.lua`，一键测试里的 redislib 冒烟同样跳过。
   默认编译，可用 `--redislib` 显式恢复；
 - `--jobs N`：设置并行编译任务数。
 
@@ -110,7 +110,7 @@ Windows 主要文件在 `build/out`：
 - `luajit.exe`、`lua51.dll`；
 - `cservice/*.so`；
 - `luaclib/*.so`；
-- `luaclib/redis/*.so`（redislib 的 4 个模块）与它们共用的内核库 `rlcore.dll`，
+- `luaclib/redis/*.so`（redislib 的 5 个模块）与它们共用的内核库 `rlcore.dll`，
   以及 `lualib/` 中的同名包装文件；
 - Skynet 的 `lualib`、`service` 和 `examples`。
 
@@ -152,13 +152,13 @@ skynet.exe examples\config
   sqlite3、zlib、zset/skiplist）源码，作为本仓库的 vendored 目录参与双平台构建，
   产物为 `luaclib/*.so`；`zset.lua` 与 `protoc.lua` 会叠加到输出的 `lualib/`。
   这些库不修改任何子模块，可用 `--no-netbull` 整组关闭。
-- `redislib-src/` 把 Redis 8.10.0 的 Bitmap、HyperLogLog、Sorted Set、Geo 四组算法
-  内核移植成进程内 Lua 库，命令面共 53 个：bitmap 7、hll 5、sortedset 31（该版本
-  全部非阻塞 `Z*` 去掉 `ZSCAN`）、geo 10。内核文件只做三种机械编辑——include 换成
+- `redislib-src/` 把 Redis 8.10.0 的 Bitmap、HyperLogLog、Sorted Set、Geo、Set 五组算法
+  内核移植成进程内 Lua 库，命令面共 68 个：bitmap 7、hll 5、sortedset 31（该版本
+  全部非阻塞 `Z*` 去掉 `ZSCAN`）、geo 10、set 15（同样去掉 `SSCAN`）。内核文件只做三种机械编辑——include 换成
   本仓库的 shim、删掉 `xxxCommand(client*)` 命令层、加一行移植说明——`sds`、`dict`、
-  `listpack`、`intset`、`adlist`、`t_zset`、`hyperloglog`、`bitops`、`geo`、
+  `listpack`、`intset`、`adlist`、`t_zset`、`t_set`、`hyperloglog`、`bitops`、`geo`、
   `geohash*`、`pqsort`、`util`、`crc16` 等的算法行不动。内核只编译成一份共享库
-  （Windows `rlcore.dll`、Linux `librlcore.so`），4 个模块都从这里取内核调用，不再
+  （Windows `rlcore.dll`、Linux `librlcore.so`），5 个模块都从这里取内核调用，不再
   各带一份内核副本——顺带也不再各带一份 `server`、dict 种子与 RNG 流。跨这个边界的
   只有函数：facade 原先直读的三个全局 `server`、`hashDictType`、`sdsReplyDictType`
   改走 `redislib_port.c` 里的访问函数，因为在 Windows 上取另一个 DLL 里数据的地址
@@ -232,7 +232,7 @@ Skynet，验证 sharetable 的循环图、重复引用、函数、lightuserdata�
 在 Skynet 服务内验证 cjson JSON 往返、lfs 目录属性、zlib 压缩往返（走
 `skynet_malloc`）、内存 SQLite 增删查、zset 有序集合排名、luacurl 句柄与选项、以及
 protoc+pb 的 protobuf 编码解码往返。还有一项 redislib 冒烟测试，同样在 Skynet
-服务内跑 53 个命令的回复形状与 Redis 原文错误文本、`PFSELFTEST`、HLL 稀疏↔稠密往返、
+服务内跑 68 个命令的回复形状与 Redis 原文错误文本、`PFSELFTEST`、HLL 稀疏↔稠密往返、
 有序集合的两种内部编码、以 Redis GEO 文档数值为准的地理距离与跨 180° 经线行为、
 `dump()`/`load()` 字节互通、包装层的大写别名与表形态入参，以及 1e6 元素规模下的
 rank/range/LIMIT 精确断言；Windows 实测整套 2.3 秒，`--no-redislib` 时该项打印跳过
