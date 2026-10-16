@@ -4,9 +4,10 @@ set -euo pipefail
 export PATH="/bin:/usr/bin:$PATH"
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+source "$ROOT_DIR/scripts/build-common.sh"
+ROOT_DIR=$(canonicalize_root "$ROOT_DIR")
 WORK_DIR="$ROOT_DIR/build/work"
 OUT_DIR="$ROOT_DIR/build/out"
-source "$ROOT_DIR/scripts/build-common.sh"
 
 usage() {
 	cat <<'USAGE'

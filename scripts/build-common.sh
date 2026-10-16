@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 # Shared by the Windows and Linux entry points. They set ROOT_DIR/WORK_DIR/OUT_DIR.
 
+# MSYS bash started straight from a cmd.exe working directory reports that
+# directory in drive-letter form (E:/git/x), while `cd` plus `pwd -P` from
+# inside the same shell reports the POSIX form (/e/git/x). The two spellings
+# address the same tree, so prepare_sources' guard would reject a build that is
+# nowhere outside the workspace. Re-entering the directory makes the spelling
+# unambiguous; it is a no-op for the POSIX form and for every Linux path.
+canonicalize_root() {
+	case "$1" in
+		[A-Za-z]:[\\/]*) (CDPATH= cd -- "$1" && pwd -P) ;;
+		*) printf '%s\n' "$1" ;;
+	esac
+}
+
 parse_build_options() {
 	SYNC_MODE=update
 	RUN_TESTS=1
