@@ -49,6 +49,11 @@ jobs:
         with:
           submodules: recursive
 
+      # CI 检出的是 pin 住的嵌套 skynet 修订，本机常常已经拉更新——这条比构建
+      # 快两个数量级，先确认兼容补丁在这两个修订上都还能应用。
+      - name: 兼容补丁可应用性检查
+        run: ./scripts/check-patch.sh
+
       # 本机构建时经常把嵌套 skynet 拉到比 pinned 更新的提交；CI 默认按
       # pinned 的提交图构建，需要测别的修订时显式传进来。
       - name: 可选：检出指定的嵌套 skynet 修订
@@ -92,6 +97,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: 兼容补丁可应用性检查
+        shell: bash
+        run: ./scripts/check-patch.sh
 
       - name: 可选：检出指定的嵌套 skynet 修订
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.skynet_rev != ''
