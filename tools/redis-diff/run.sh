@@ -95,4 +95,7 @@ RC=${PIPESTATUS[0]}
 set -e
 echo "diff exit code (differing records): $RC"
 echo "full output: $WORK/diff.txt"
-exit "$RC"
+# 差异条数当作退出码方便本地一句 `echo $?` 看量级，但 shell 会把它截成 mod 256：
+# 正好 256 条差异会退出 0。流水线要的是"有差异就红"，所以在这里收敛成 0/1。
+[ "$RC" -eq 0 ] || exit 1
+exit 0

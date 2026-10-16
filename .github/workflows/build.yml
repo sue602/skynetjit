@@ -1,0 +1,200 @@
+name: build
+
+# 两个平台的可复现构建 + 冒烟测试，外加一次拿真实 redis-server 做的差分对测。
+# 每个平台都跑两档：完整构建，以及 --no-netbull --no-redislib 的最小构建
+# （最小档验证 redislib / NetBull 确实是可摘的，摘掉后主干仍然绿）。
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+  workflow_dispatch:
+    inputs:
+      skynet_rev:
+        description: '嵌套 skynet 子模块检出的修订（留空则用仓库里 pinned 的那个）'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REDIS_VER: '8.10.0'
+
+jobs:
+  linux:
+    name: linux (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: full
+            flags: '--no-sync'
+          - name: minimal
+            flags: '--no-sync --no-netbull --no-redislib'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # 本机构建时经常把嵌套 skynet 拉到比 pinned 更新的提交；CI 默认按
+      # pinned 的提交图构建，需要测别的修订时显式传进来。
+      - name: 可选：检出指定的嵌套 skynet 修订
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.skynet_rev != ''
+        run: |
+          git -C third_party/skynet-mingw/skynet fetch --depth 1 origin '${{ github.event.inputs.skynet_rev }}'
+          git -C third_party/skynet-mingw/skynet checkout FETCH_HEAD
+
+      - name: 安装 NetBull 需要的系统开发包
+        if: matrix.name == 'full'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev zlib1g-dev
+
+      - name: 构建并测试
+        run: ./build-linux.sh ${{ matrix.flags }}
+
+      - name: 失败时保留测试日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.name }}-logs
+          path: |
+            build/linux-out/*.log
+            build/linux-out/*.ok
+          if-no-files-found: ignore
+
+  windows:
+    name: windows (${{ matrix.name }})
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: full
+            flags: '--no-sync'
+          - name: minimal
+            flags: '--no-sync --no-netbull --no-redislib'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: 可选：检出指定的嵌套 skynet 修订
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.skynet_rev != ''
+        shell: bash
+        run: |
+          git -C third_party/skynet-mingw/skynet fetch --depth 1 origin '${{ github.event.inputs.skynet_rev }}'
+          git -C third_party/skynet-mingw/skynet checkout FETCH_HEAD
+
+      - name: 装 MinGW-w64 x64 工具链
+        shell: cmd
+        run: >-
+          C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed
+          mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils
+          mingw-w64-x86_64-make tar gzip
+
+      # build.sh 用裸 `make`；mingw-w64 的 make 包只保证给出 mingw32-make.exe，
+      # 所以补一个同名副本，避免回落到 msys 版的 make 去跑 MinGW 的 Makefile。
+      - name: 预检工具链
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x /c/msys64/mingw64/bin/gcc.exe
+          test -x /c/msys64/mingw64/bin/mingw32-make.exe ||
+            test -x /c/msys64/mingw64/bin/make.exe
+          if [ ! -x /c/msys64/mingw64/bin/make.exe ]; then
+            cp /c/msys64/mingw64/bin/mingw32-make.exe /c/msys64/mingw64/bin/make.exe
+          fi
+          echo 'int main(){return 0;}' > /tmp/t.c
+          /c/msys64/mingw64/bin/gcc.exe -dumpmachine
+          /c/msys64/mingw64/bin/gcc.exe /tmp/t.c -o /tmp/t.exe && /tmp/t.exe
+
+      - name: 缓存 Windows 侧依赖（zlib、libcurl、CMake）
+        if: matrix.name == 'full'
+        uses: actions/cache@v4
+        with:
+          path: build/deps
+          key: ${{ runner.os }}-deps-zlib1.3.1-curl8.22.0-cmake3.31.6
+
+      - name: 构建并测试
+        shell: cmd
+        run: build.bat ${{ matrix.flags }}
+
+      - name: 失败时保留测试日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.name }}-logs
+          path: |
+            build/out/*.log
+            build/out/*.ok
+          if-no-files-found: ignore
+
+  redis-diff:
+    name: 对真实 redis-server 做差分
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: 安装构建 redis-server 与 NetBull 需要的包
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev zlib1g-dev
+
+      - name: 缓存 redis-server 二进制
+        uses: actions/cache@v4
+        with:
+          path: ~/src
+          key: ${{ runner.os }}-redis-${{ env.REDIS_VER }}
+
+      - name: 取并构建 redis-server ${{ env.REDIS_VER }}
+        run: |
+          set -euo pipefail
+          if [ ! -x "$HOME/src/redis-$REDIS_VER/src/redis-server" ]; then
+            mkdir -p "$HOME/src"
+            for u in \
+              "https://download.redis.io/releases/redis-$REDIS_VER.tar.gz" \
+              "https://downloads.redis.io/redis-$REDIS_VER/redis-$REDIS_VER.tar.gz" \
+              "https://github.com/redis/redis/archive/refs/tags/$REDIS_VER.tar.gz"; do
+              if curl -fSL --retry 3 -o /tmp/redis.tgz "$u"; then break; fi
+            done
+            tar -xf /tmp/redis.tgz -C "$HOME/src"
+            make -C "$HOME/src/redis-$REDIS_VER" -j"$(nproc)" MALLOC=libc redis-server
+          fi
+          "$HOME/src/redis-$REDIS_VER/src/redis-server" --version
+
+      - name: 构建 redislib（跳过冒烟测试，交给 linux/windows 两个 job）
+        run: ./build-linux.sh --no-sync --no-test
+
+      - name: 差分重放（两个种子）
+        run: |
+          ./tools/redis-diff/run.sh 1 3000
+          ./tools/redis-diff/run.sh 4242 1200
+
+      - name: dump/load 与真实 redis 互操作
+        run: ./tools/redis-diff/interop.sh
+
+      - name: 失败时保留差分产物
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: redis-diff-work
+          path: tools/redis-diff/work/
+          if-no-files-found: ignore

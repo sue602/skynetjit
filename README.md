@@ -84,6 +84,24 @@ Linux 使用独立的一键脚本，产物位于 `build/linux-out`，不与 Wind
 ./scripts/update-submodules.sh
 ```
 
+## 持续集成
+
+`.github/workflows/build.yml` 在 push、pull request 和手动触发时跑三个作业：
+
+- `linux (full|minimal)`：Ubuntu 24.04 上 `./build-linux.sh --no-sync`，
+  含一键测试；`minimal` 档加 `--no-netbull --no-redislib`，验证这两组确实可摘，
+  摘掉后主干仍然构建并通过测试；
+- `windows (full|minimal)`：Windows runner 上装 MSYS2 的 mingw-w64 x64 工具链，
+  用仓库自己的入口 `build.bat` 跑同样的两档；`full` 档的 zlib/libcurl/CMake
+  依赖缓存到 `build/deps`；
+- `redis-diff`：下载并编译与移植目标同版本的 `redis-server` 8.10.0，先用
+  `--no-test` 构建 redislib，再跑 `tools/redis-diff/run.sh`（两个种子的差分重放）
+  与 `tools/redis-diff/interop.sh`（dump/load 互操作）。差分记录数不为 0 就判失败。
+
+子模块按仓库里 pinned 的提交图检出，所以 CI 测的一定是可复现的那一组提交。
+本机构建经常把嵌套的 `skynet` 子模块拉到比 pinned 更新的提交；要让 CI 也测那个
+修订，用手动触发里的 `skynet_rev` 输入显式指定。
+
 ## 构建产物
 
 Windows 主要文件在 `build/out`：
